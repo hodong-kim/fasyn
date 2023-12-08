@@ -19,10 +19,27 @@
 #include <errno.h>
 #include "fastcgi.h"
 
+#define PADDING(offset, align)  (-(offset) & ((align) - 1))
+const char* fcgi_types[] = {
+  nullptr,
+  "FCGI_BEGIN_REQUEST",
+  "FCGI_ABORT_REQUEST",
+  "FCGI_END_REQUEST",
+  "FCGI_PARAMS",
+  "FCGI_STDIN",
+  "FCGI_STDOUT",
+  "FCGI_STDERR",
+  "FCGI_DATA",
+  "FCGI_GET_VALUES",
+  "FCGI_GET_VALUES_RESULT",
+  "FCGI_UNKNOWN_TYPE"
+};
+
 enum _State : uint8_t {
-  RECV_HEADER =  1 << 0,
+  RECV_HEADER  = 1 << 0,
   RECV_CONTENT = 1 << 1,
-  SEND
+  SEND_STDOUT  = 1 << 2,
+  SEND_END_REQ = 1 << 3
 };
 typedef enum _State State;
 
@@ -85,12 +102,6 @@ static void cb_send (int sockfd, short revents, void* user_data)
   c_log_info ("%ld cb_send", time (NULL));
   Conn* conn = user_data;
 
-  if (conn->state != SEND)
-  {
-    c_log_warning ("Programming error");
-    abort ();
-  }
-
   ssize_t n_bytes;
   n_bytes = send (sockfd, conn->buf + conn->pos,
                   conn->packet_len - conn->pos, 0);
@@ -101,20 +112,49 @@ static void cb_send (int sockfd, short revents, void* user_data)
 
     if (conn->pos == conn->packet_len)
     {
-      c_loop_remove_fd (loop, sockfd);
+      if (conn->state == SEND_STDOUT)
+      {
+        conn_resize_capa (conn, sizeof (FCGI_EndRequestRecord));
+        FCGI_EndRequestRecord* rec = (FCGI_EndRequestRecord*) conn->buf;
+        rec->header.version = FCGI_VERSION_1;
+        rec->header.type = FCGI_END_REQUEST;
 
-      if ((conn->flags & FCGI_KEEP_CONN) == 0)
-      {
-        c_log_info ("(conn->flags & FCGI_KEEP_CONN) == 0");
-        conn_free (conn);
-        close (sockfd);
-        return;
-      }
-      else
-      {
-        c_loop_add_fd (loop, sockfd, POLLIN, cb_incoming, conn);
-        conn->state = RECV_HEADER;
+        rec->header.requestIdB1 = (uint8_t) ((conn->req_id >> 8) & 0xff);
+        rec->header.requestIdB0 = (uint8_t) (conn->req_id & 0xff);
+
+        c_log_info ("rec->body len: %d", (int) sizeof (rec->body));
+
+        rec->header.contentLengthB1 = (uint8_t) ((sizeof (rec->body) >> 8) & 0xff);
+        rec->header.contentLengthB0 = (uint8_t) (sizeof (rec->body) & 0xff);
+
+        rec->header.paddingLength = 0;
+        rec->header.reserved = 0;
+
+        // The appStatus component is an application-level status code.
+        // Each role documents its usage of appStatus.
+        uint32_t appStatus = 0;
+        // The protocolStatus component is a protocol-level status code.
+        uint8_t  protocolStatus = FCGI_CANT_MPX_CONN;
+
+        rec->body.appStatusB3    = (uint8_t) ((appStatus >> 24) & 0xff);
+        rec->body.appStatusB2    = (uint8_t) ((appStatus >> 16) & 0xff);
+        rec->body.appStatusB1    = (uint8_t) ((appStatus >>  8) & 0xff);
+        rec->body.appStatusB0    = (uint8_t) ((appStatus      ) & 0xff);
+        rec->body.protocolStatus = (uint8_t) protocolStatus;
+        memset (rec->body.reserved, 0, sizeof (rec->body.reserved));
+        conn->state = SEND_END_REQ;
         conn->pos = 0;
+        conn->packet_len = (sizeof (rec->body));
+
+        if ((conn->flags & FCGI_KEEP_CONN) == 0)
+        {
+          c_log_info ("(conn->flags & FCGI_KEEP_CONN) == 0");
+          c_loop_remove_fd (loop, sockfd);
+          conn_free (conn);
+          close (sockfd);
+        }
+
+        return;
       }
     }
   }
@@ -176,7 +216,7 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
         c_log_info ("Receiving the header has been completed.");
         FCGI_Header* header = (FCGI_Header*) conn->buf;
         c_log_info ("version: %hhu", header->version);
-        c_log_info ("type: %hhu", header->type);
+        c_log_info ("type: %s", fcgi_types[header->type]);
         c_log_info ("requestIdB1: %hhu", header->requestIdB1);
         c_log_info ("requestIdB0: %hhu", header->requestIdB0);
         c_log_info ("contentLengthB1: %hhu", header->contentLengthB1);
@@ -188,14 +228,44 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
         conn->req_id  = (header->requestIdB1 << 8) + header->requestIdB0;
         conn->content_len = (header->contentLengthB1 << 8) + header->contentLengthB0;
         conn->padding_len = header->paddingLength;
-        conn->state = RECV_CONTENT;
-        conn->pos = 0;
+
         c_log_info ("req_id: %hu", conn->req_id);
         c_log_info ("content_len: %hu", conn->content_len);
-        if (conn->type != FCGI_BEGIN_REQUEST &&
-            conn->req_id == FCGI_NULL_REQUEST_ID) // 0
+
+        conn->pos = 0;
+
+        if (conn->content_len > 0)
         {
-          abort ();
+          conn->state = RECV_CONTENT;
+        }
+        else if (conn->content_len == 0 && conn->type == FCGI_STDIN)
+        {
+          char content[] =
+            "Status: 200 OK\r\n"
+            "Content-type: text/plain\r\n"
+            "\r\n"
+            "Testing";
+          int content_len = sizeof (content) - 1;
+          int padding_len = PADDING (content_len, 8);
+          conn_resize_capa (conn, FCGI_HEADER_LEN + content_len + padding_len);
+          memcpy (conn->buf + FCGI_HEADER_LEN, content, content_len);
+          memset (conn->buf + FCGI_HEADER_LEN + content_len, 0, padding_len);
+
+          FCGI_Header* header = (FCGI_Header*) conn->buf;
+          header->version = FCGI_VERSION_1;
+          header->type = FCGI_STDOUT;
+          header->requestIdB1 = (uint8_t) ((conn->req_id >> 8) & 0xff);
+          header->requestIdB0 = (uint8_t) (conn->req_id & 0xff);
+          header->contentLengthB1 = (uint8_t) ((content_len >> 8) & 0xff);
+          header->contentLengthB0 = (uint8_t) (content_len & 0xff);
+          header->paddingLength = padding_len;
+          header->reserved = 0;
+          conn->state = SEND_STDOUT;
+          conn->pos = 0;
+          conn->packet_len = FCGI_HEADER_LEN + content_len;
+
+          c_loop_remove_fd (loop, sockfd);
+          c_loop_add_fd (loop, sockfd, POLLOUT, cb_send, conn);
         }
       }
       else // RECV_CONTENT
@@ -213,52 +283,12 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
               conn->flags = body->flags & FCGI_KEEP_CONN;
               conn->state = RECV_HEADER;
               conn->pos = 0;
-              // send end req rec
-              /*
-              conn_resize_capa (conn, sizeof (FCGI_EndRequestRecord));
-              FCGI_EndRequestRecord* rec = (FCGI_EndRequestRecord*) conn->buf;
-              rec->header.version = FCGI_VERSION_1;
-              rec->header.type = FCGI_END_REQUEST;
-
-              rec->header.requestIdB1 = (uint8_t) ((conn->req_id >> 8) & 0xff);
-              rec->header.requestIdB0 = (uint8_t) (conn->req_id & 0xff);
-
-              c_log_info ("rec->body len: %d", (int) sizeof (rec->body));
-
-              rec->header.contentLengthB1 = (uint8_t) ((sizeof (rec->body) >> 8) & 0xff);
-              rec->header.contentLengthB0 = (uint8_t) (sizeof (rec->body) & 0xff);
-
-              rec->header.paddingLength = 0;
-              rec->header.reserved = 0;
-
-              // The appStatus component is an application-level status code.
-              // Each role documents its usage of appStatus.
-              uint32_t appStatus = 0;
-              // The protocolStatus component is a protocol-level status code.
-              uint8_t  protocolStatus = FCGI_CANT_MPX_CONN;
-
-              rec->body.appStatusB3    = (uint8_t) ((appStatus >> 24) & 0xff);
-              rec->body.appStatusB2    = (uint8_t) ((appStatus >> 16) & 0xff);
-              rec->body.appStatusB1    = (uint8_t) ((appStatus >>  8) & 0xff);
-              rec->body.appStatusB0    = (uint8_t) ((appStatus      ) & 0xff);
-              rec->body.protocolStatus = (uint8_t) protocolStatus;
-              memset (rec->body.reserved, 0, sizeof (rec->body.reserved));
-              conn->state = SEND;
-              conn->pos = 0;
-              conn->packet_len = (sizeof (rec->body));
-              c_loop_remove_fd (loop, sockfd);
-              c_loop_add_fd (loop, sockfd, POLLOUT, cb_send, conn);
-              return;
-              */
             }
 
             break;
           case FCGI_PARAMS: // 4
             {
               c_log_info ("FCGI_PARAMS");
-              conn->state = RECV_HEADER;
-              conn->pos = 0;
-
               uint8_t name_len;
               uint8_t value_len;
               uint8_t* p = conn->buf;
@@ -272,6 +302,9 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
                         value_len, p + name_len);
                 p = p + name_len + value_len;
               }
+
+              conn->state = RECV_HEADER;
+              conn->pos = 0;
             }
 
             break;
