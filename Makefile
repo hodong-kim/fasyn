@@ -1,12 +1,23 @@
-CFLAGS = -Wall -I/usr/local/include -I/home/hodong/projects/nimf/clair/src
-LIBADD = /home/hodong/projects/nimf/clair/src/libclair.a
-TARGET = checkout
+DEPS_CFLAGS = `pkg-config --cflags jansson libcurl`
+DEPS_LIBS   = -L/usr/local/lib -lintl
 
-C_SOURCES = $(TARGET).c
-C_HEADERS = fastcgi.h
+CFLAGS = -Wall -Werror \
+	-I/usr/local/include -I/home/hodong/projects/nimf/clair/src \
+	$(DEPS_CFLAGS)
 
-checkout: Makefile $(C_SOURCES) $(C_HEADERS)
-	$(CC) $(CFLAGS) $(C_SOURCES) $(LIBADD) -o $(TARGET)
+LIBADD = \
+	/home/hodong/projects/nimf/clair/src/libclair.a \
+	/usr/local/lib/libjansson.a \
+	/usr/local/lib/libcurl.a
+
+TARGET = fcgi
+
+C_SOURCES = $(TARGET).c main.c
+C_HEADERS = fastcgi.h fcgi.h
+
+$(TARGET): Makefile $(C_SOURCES) $(C_HEADERS) $(TARGET).sock
+	$(CC) $(CFLAGS) $(C_SOURCES) $(LIBADD) $(DEPS_LIBS) -o $(TARGET)
+	sudo chown www:www fcgi.sock
 
 clean:
-	rm -f $(TARGET) $(TARGET).sock
+	rm -f $(TARGET)

@@ -1,24 +1,36 @@
-/* -*- Mode: C; indent-tabs-mode: nil; c-basic-offset: 2; tab-width: 2 -*-  */
+/* -*- Mode: C; indent-tabs-mode: nil; c-basic-offset: 2; tab-width: 2 -*- */
 /*
- * checkout.c
- * Copyright (C) 2023 Hodong Kim, All rights reserved.
- * Unauthorized copying of this software, via any medium is strictly prohibited.
- * Proprietary and confidential.
- * Written by Hodong Kim <hodong@nimfsoft.com>
+ * fcgi.c
+ * This file is part of Fcgi.
+ *
+ * Copyright (C) 2023 Hodong Kim <hodong@nimfsoft.com>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+#include "fcgi.h"
+
 #include <stdio.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <c-loop.h>
 #include <c-log.h>
 #include <c-mem.h>
 #include <time.h>
-#include <signal.h>
 #include <fcntl.h>
 #include <string.h>
 #include <errno.h>
 #include "fastcgi.h"
+#include "fcgi.h"
 
+#define SOCK_PATH  "/home/hodong/fcgi/fcgi.sock"
 #define PADDING(offset, align)  (-(offset) & ((align) - 1))
 const char* fcgi_types[] = {
   nullptr,
@@ -45,6 +57,7 @@ typedef enum _State State;
 
 typedef struct _Conn Conn;
 struct _Conn {
+  Fcgi* fcgi;
   uint8_t* buf;
   size_t   pos;
   size_t   buf_capa;
@@ -62,13 +75,14 @@ struct _Conn {
   State    state; /* uint8_t */
 };
 
-Conn* conn_new ()
+Conn* conn_new (Fcgi* fcgi)
 {
   #define CONN_BUF_DEFAULT_CAPA 16
   Conn* conn = c_calloc (1, sizeof (Conn));
   conn->buf_capa = CONN_BUF_DEFAULT_CAPA;
   conn->buf   = c_malloc (CONN_BUF_DEFAULT_CAPA);
   conn->state = RECV_HEADER;
+  conn->fcgi = fcgi;
   return conn;
 }
 
@@ -93,14 +107,35 @@ void conn_resize_capa (Conn* conn, size_t req_len)
     conn->buf = c_realloc (conn->buf, conn->buf_capa);
 }
 
-CLoop* loop;
-
-static void cb_incoming (int sockfd, short revents, void* user_data);
-
 static void cb_send (int sockfd, short revents, void* user_data)
 {
   c_log_info ("%ld cb_send", time (NULL));
   Conn* conn = user_data;
+
+  if (conn->state == SEND_STDOUT)
+  {
+    char content[] =
+      "Status: 200 OK\r\n"
+      "Content-type: text/plain\r\n"
+      "\r\n"
+      "Testing";
+    int content_len = sizeof (content) - 1;
+    int padding_len = PADDING (content_len, 8);
+    conn_resize_capa (conn, FCGI_HEADER_LEN + content_len + padding_len);
+    memcpy (conn->buf + FCGI_HEADER_LEN, content, content_len);
+    memset (conn->buf + FCGI_HEADER_LEN + content_len, 0, padding_len);
+
+    FCGI_Header* header = (FCGI_Header*) conn->buf;
+    header->version = FCGI_VERSION_1;
+    header->type = FCGI_STDOUT;
+    header->requestIdB1 = (uint8_t) ((conn->req_id >> 8) & 0xff);
+    header->requestIdB0 = (uint8_t) (conn->req_id & 0xff);
+    header->contentLengthB1 = (uint8_t) ((content_len >> 8) & 0xff);
+    header->contentLengthB0 = (uint8_t) (content_len & 0xff);
+    header->paddingLength = padding_len;
+    header->reserved = 0;
+    conn->packet_len = FCGI_HEADER_LEN + content_len;
+  }
 
   ssize_t n_bytes;
   n_bytes = send (sockfd, conn->buf + conn->pos,
@@ -149,7 +184,7 @@ static void cb_send (int sockfd, short revents, void* user_data)
         if ((conn->flags & FCGI_KEEP_CONN) == 0)
         {
           c_log_info ("(conn->flags & FCGI_KEEP_CONN) == 0");
-          c_loop_remove_fd (loop, sockfd);
+          c_loop_remove_fd (conn->fcgi->loop, sockfd);
           conn_free (conn);
           close (sockfd);
         }
@@ -167,7 +202,7 @@ static void cb_send (int sockfd, short revents, void* user_data)
     else
     {
       c_log_critical ("send() failed: %s", strerror (errno));
-      c_loop_remove_fd (loop, sockfd);
+      c_loop_remove_fd (conn->fcgi->loop, sockfd);
       conn_free (conn);
       close (sockfd);
     }
@@ -182,7 +217,7 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
   if (revents & (POLLHUP | POLLERR))
   {
     c_log_critical ("POLLHUP | POLLERR");
-    c_loop_remove_fd (loop, sockfd);
+    c_loop_remove_fd (conn->fcgi->loop, sockfd);
     conn_free (conn);
     close (sockfd);
     return;
@@ -240,32 +275,10 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
         }
         else if (conn->content_len == 0 && conn->type == FCGI_STDIN)
         {
-          char content[] =
-            "Status: 200 OK\r\n"
-            "Content-type: text/plain\r\n"
-            "\r\n"
-            "Testing";
-          int content_len = sizeof (content) - 1;
-          int padding_len = PADDING (content_len, 8);
-          conn_resize_capa (conn, FCGI_HEADER_LEN + content_len + padding_len);
-          memcpy (conn->buf + FCGI_HEADER_LEN, content, content_len);
-          memset (conn->buf + FCGI_HEADER_LEN + content_len, 0, padding_len);
-
-          FCGI_Header* header = (FCGI_Header*) conn->buf;
-          header->version = FCGI_VERSION_1;
-          header->type = FCGI_STDOUT;
-          header->requestIdB1 = (uint8_t) ((conn->req_id >> 8) & 0xff);
-          header->requestIdB0 = (uint8_t) (conn->req_id & 0xff);
-          header->contentLengthB1 = (uint8_t) ((content_len >> 8) & 0xff);
-          header->contentLengthB0 = (uint8_t) (content_len & 0xff);
-          header->paddingLength = padding_len;
-          header->reserved = 0;
           conn->state = SEND_STDOUT;
           conn->pos = 0;
-          conn->packet_len = FCGI_HEADER_LEN + content_len;
-
-          c_loop_remove_fd (loop, sockfd);
-          c_loop_add_fd (loop, sockfd, POLLOUT, cb_send, conn);
+           c_loop_remove_fd (conn->fcgi->loop, sockfd);
+          c_loop_add_fd (conn->fcgi->loop, sockfd, POLLOUT, cb_send, conn);
         }
       }
       else // RECV_CONTENT
@@ -339,7 +352,7 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
        The value 0 may also be returned if the requested number of bytes
        to receive from a stream socket was 0.
      */
-    c_loop_remove_fd (loop, sockfd);
+    c_loop_remove_fd (conn->fcgi->loop, sockfd);
     conn_free (conn);
     close (sockfd);
   }
@@ -354,7 +367,7 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
     else
     {
       c_log_critical ("%s", strerror (errno));
-      c_loop_remove_fd (loop, sockfd);
+      c_loop_remove_fd (conn->fcgi->loop, sockfd);
       conn_free (conn);
       close (sockfd);
     }
@@ -364,90 +377,99 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
 static void cb_new_req (int sockfd, short revents, void* user_data)
 {
   printf ("%ld cb_new_req\n", time (NULL));
-  struct sockaddr_un* addr = user_data;
+  Fcgi* fcgi = user_data;
 
   if (revents & (POLLHUP | POLLERR))
   {
     c_log_critical ("A connection could not be established.");
-    c_loop_remove_fd (loop, sockfd);
+    c_loop_remove_fd (fcgi->loop, sockfd);
     return;
   }
 
   int client_fd;
-  socklen_t addr_len = sizeof (*addr);
+  socklen_t addr_len = sizeof (fcgi->addr);
 
-  if ((client_fd = accept4 (sockfd, (struct sockaddr*) addr,
+  if ((client_fd = accept4 (sockfd, (struct sockaddr*) &fcgi->addr,
                             &addr_len, SOCK_NONBLOCK)) < 0)
   {
     c_log_critical ("accept4() failed");
-    c_loop_remove_fd (loop, sockfd);
+    c_loop_remove_fd (fcgi->loop, sockfd);
     return;
   }
 
-  Conn* conn = conn_new ();
-  c_loop_add_fd (loop, client_fd, POLLIN, cb_incoming, conn);
+  Conn* conn = conn_new (fcgi);
+  c_loop_add_fd (fcgi->loop, client_fd, POLLIN, cb_incoming, conn);
 }
 
-static void cb_quit (int signo)
+Fcgi* fcgi_new (int argc, char** argv)
 {
-  c_loop_quit (loop);
-}
+  Fcgi* fcgi = c_calloc (1, sizeof (Fcgi));
 
-int main ()
-{
-  loop = c_loop_new ();
-
-  // FCGX_Init ();
-  int sockfd;
-  if ((sockfd = socket (AF_UNIX, SOCK_STREAM, 0)) < 0)
+  if ((fcgi->sockfd = socket (AF_UNIX, SOCK_STREAM, 0)) < 0)
   {
-    c_log_critical ("socket() failed");
-    return 1;
+    c_log_critical ("socket() failed: %s", strerror (errno));
+    goto FAIL;
   }
 
   int opt = 1;
-  if (setsockopt (sockfd, SOL_SOCKET, SO_REUSEADDR, (char*) &opt, sizeof (opt)) < 0)
+  if (setsockopt (fcgi->sockfd, SOL_SOCKET, SO_REUSEADDR, (char*) &opt,
+      sizeof (opt)) < 0)
   {
     c_log_critical ("setsockopt() failed: %s", strerror (errno));
-    return 1;
+    goto FAIL;
   }
 
-  struct sockaddr_un addr = { 0 };
-  addr.sun_family = AF_UNIX;
-  snprintf (addr.sun_path, sizeof (addr.sun_path), "%s", "/home/hodong/checkout/checkout.sock");
+  fcgi->addr.sun_family = AF_UNIX;
+  snprintf (fcgi->addr.sun_path, sizeof (fcgi->addr.sun_path), "%s", SOCK_PATH);
 
-  unlink ("/home/hodong/checkout/checkout.sock");
+  unlink (SOCK_PATH);
 
-  if (bind (sockfd, (struct sockaddr*) &addr, sizeof (addr)) < 0)
+  if (bind (fcgi->sockfd, (struct sockaddr*) &fcgi->addr,
+      sizeof (fcgi->addr)) < 0)
   {
     c_log_critical ("bind() failed: %s", strerror (errno));
-    return 1;
+    goto FAIL;
   }
 
-  if (listen (sockfd, SOMAXCONN) < 0)
+  if (listen (fcgi->sockfd, SOMAXCONN) < 0)
   {
-    c_log_critical ("listen() failed");
-    return 1;
+    c_log_critical ("listen() failed: %s", strerror (errno));
+    goto FAIL;
   }
 
-  c_loop_add_fd (loop, sockfd, POLLIN, cb_new_req, &addr);
+  fcgi->loop = c_loop_new ();
+  c_loop_add_fd (fcgi->loop, fcgi->sockfd, POLLIN, cb_new_req, fcgi);
 
-  struct sigaction quit      = { .sa_handler = cb_quit,
-                                 .sa_flags   = SA_SIGINFO };
-  struct sigaction ignore    = { .sa_handler = SIG_IGN,
-                                 .sa_flags   = 0 };
-  struct sigaction no_zombie = { .sa_handler = SIG_DFL,
-                                 .sa_flags   = SA_NOCLDWAIT };
+  return fcgi;
 
-  sigaction (SIGINT,  &quit,      nullptr);
-  sigaction (SIGTERM, &quit,      nullptr);
-  sigaction (SIGTSTP, &ignore,    nullptr);
-  sigaction (SIGCHLD, &no_zombie, nullptr);
+  FAIL:
+  fcgi_free (fcgi);
+  return nullptr;
+}
 
-  c_loop_run (loop);
+void fcgi_free (Fcgi* fcgi)
+{
+  if (!fcgi)
+    return;
 
-  c_loop_remove_fd (loop, sockfd);
-  c_loop_free (loop);
+  c_loop_remove_fd (fcgi->loop, fcgi->sockfd);
 
-  return 0;
+  if (fcgi->sockfd > -1)
+    close (fcgi->sockfd);
+
+  c_loop_free (fcgi->loop);
+  free (fcgi);
+}
+
+int fcgi_run (Fcgi* fcgi)
+{
+  if (fcgi)
+    return c_loop_run (fcgi->loop);
+  else
+    return 1;
+}
+
+void fcgi_quit (Fcgi* fcgi)
+{
+  c_loop_quit (fcgi->loop);
 }
