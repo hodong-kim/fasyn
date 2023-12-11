@@ -1,7 +1,7 @@
 /* -*- Mode: C; indent-tabs-mode: nil; c-basic-offset: 2; tab-width: 2 -*- */
 /*
- * fcgi.h
- * This file is part of Fcgi.
+ * fasyn.h
+ * This file is part of Fasyn.
  *
  * Copyright (C) 2023 Hodong Kim <hodong@nimfsoft.com>
  *
@@ -16,8 +16,8 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#ifndef __FCGI_H__
-#define __FCGI_H__
+#ifndef __FASYN_H__
+#define __FASYN_H__
 
 #include "c-macros.h"
 #include "c-loop.h"
@@ -25,18 +25,18 @@
 
 C_BEGIN_DECLS
 
-typedef struct _Fcgi Fcgi;
-struct _Fcgi {
-  CLoop* loop;
-  int    sockfd;
-  struct sockaddr_un addr;
-};
+typedef struct _Fasyn Fasyn;
+typedef struct _FasynConn FasynConn;
+typedef void (*FasynCallback) (int fd, FasynConn* conn, void* user_data);
 
-Fcgi* fcgi_new  (int argc, char** argv);
-void  fcgi_free (Fcgi* fcgi);
-int   fcgi_run  (Fcgi* fcgi);
-void  fcgi_quit (Fcgi* fcgi);
+Fasyn* fasyn_new  (int argc, char** argv);
+void   fasyn_free (Fasyn* fasyn);
+int    fasyn_run  (Fasyn* fasyn);
+void   fasyn_quit (Fasyn* fasyn);
+void   fasyn_set_cb_outgoing (Fasyn* fasyn,
+                              FasynCallback cb_outgoing,
+                              void* cb_outgoing_user_data);
 
 C_END_DECLS
 
-#endif /* __FCGI_H__ */
+#endif /* __FASYN_H__ */

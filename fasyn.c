@@ -1,7 +1,7 @@
 /* -*- Mode: C; indent-tabs-mode: nil; c-basic-offset: 2; tab-width: 2 -*- */
 /*
- * fcgi.c
- * This file is part of Fcgi.
+ * fasyn.c
+ * This file is part of Fasyn.
  *
  * Copyright (C) 2023 Hodong Kim <hodong@nimfsoft.com>
  *
@@ -16,7 +16,7 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#include "fcgi.h"
+#include "fasyn.h"
 
 #include <stdio.h>
 #include <sys/socket.h>
@@ -28,9 +28,9 @@
 #include <string.h>
 #include <errno.h>
 #include "fastcgi.h"
-#include "fcgi.h"
+#include <curl/curl.h>
 
-#define SOCK_PATH  "/home/hodong/fcgi/fcgi.sock"
+#define SOCK_PATH  "/home/hodong/fasyn/fasyn.sock"
 #define PADDING(offset, align)  (-(offset) & ((align) - 1))
 const char* fcgi_types[] = {
   nullptr,
@@ -55,9 +55,20 @@ enum _State : uint8_t {
 };
 typedef enum _State State;
 
-typedef struct _Conn Conn;
-struct _Conn {
-  Fcgi* fcgi;
+struct _Fasyn {
+  CLoop* loop;
+  int    sockfd;
+  struct sockaddr_un addr;
+  CURLM* multi;
+  int    n_runnings;
+  int    timer_fd;
+  FasynCallback cb_outgoing;
+  void* cb_outgoing_user_data;
+};
+
+typedef struct _FasynConn FasynConn;
+struct _FasynConn {
+  Fasyn*   fasyn;
   uint8_t* buf;
   size_t   pos;
   size_t   buf_capa;
@@ -71,29 +82,31 @@ struct _Conn {
   // begin req body
   uint16_t role;
   uint8_t  flags;
+  //
+  CURL* easy;
 
   State    state; /* uint8_t */
 };
 
-Conn* conn_new (Fcgi* fcgi)
+FasynConn* conn_new (Fasyn* fasyn)
 {
   #define CONN_BUF_DEFAULT_CAPA 16
-  Conn* conn = c_calloc (1, sizeof (Conn));
+  FasynConn* conn = c_calloc (1, sizeof (FasynConn));
   conn->buf_capa = CONN_BUF_DEFAULT_CAPA;
   conn->buf   = c_malloc (CONN_BUF_DEFAULT_CAPA);
   conn->state = RECV_HEADER;
-  conn->fcgi = fcgi;
+  conn->fasyn = fasyn;
   return conn;
 }
 
-void conn_free (Conn* conn)
+void conn_free (FasynConn* conn)
 {
   c_log_info ("conn_free");
   free (conn->buf);
   free (conn);
 }
 
-void conn_resize_capa (Conn* conn, size_t req_len)
+void conn_resize_capa (FasynConn* conn, size_t req_len)
 {
   size_t old_capa = conn->buf_capa;
 
@@ -107,13 +120,41 @@ void conn_resize_capa (Conn* conn, size_t req_len)
     conn->buf = c_realloc (conn->buf, conn->buf_capa);
 }
 
+static size_t cb_curl_write (char *ptr, size_t size, size_t nmemb,
+                             void *user_data)
+{
+  c_log_info ("cb_curl_write");
+  //FasynConn* conn = user_data;
+  fwrite (ptr, size, nmemb, stdout);
+
+  return size * nmemb;
+}
+
 static void cb_send (int sockfd, short revents, void* user_data)
 {
-  c_log_info ("%ld cb_send", time (NULL));
-  Conn* conn = user_data;
+  c_log_info ("%ld cb_send", time (nullptr));
+  FasynConn* conn = user_data;
 
   if (conn->state == SEND_STDOUT)
   {
+    conn->easy = curl_easy_init ();
+    if (!conn->easy)
+      c_log_warning ("curl_easy_init failed");
+
+    CURLcode code = -1;
+
+    if (((code = curl_easy_setopt (conn->easy, CURLOPT_URL, "https://example.com/")) != CURLE_OK) ||
+        ((code = curl_easy_setopt (conn->easy, CURLOPT_PRIVATE, conn)) != CURLE_OK) ||
+        ((code = curl_easy_setopt (conn->easy, CURLOPT_WRITEFUNCTION, cb_curl_write)) != CURLE_OK) ||
+        ((code = curl_easy_setopt (conn->easy, CURLOPT_WRITEDATA, conn)) != CURLE_OK))
+    {
+      c_log_critical ("curl_easy_setopt failed: %s", curl_easy_strerror (code));
+    }
+
+    curl_multi_add_handle (conn->fasyn->multi, conn->easy);
+
+    // Needed: state
+
     char content[] =
       "Status: 200 OK\r\n"
       "Content-type: text/plain\r\n"
@@ -184,7 +225,9 @@ static void cb_send (int sockfd, short revents, void* user_data)
         if ((conn->flags & FCGI_KEEP_CONN) == 0)
         {
           c_log_info ("(conn->flags & FCGI_KEEP_CONN) == 0");
-          c_loop_remove_fd (conn->fcgi->loop, sockfd);
+          c_loop_remove_fd (conn->fasyn->loop, sockfd);
+          //curl_multi_remove_handle (conn->fasyn->multi, conn->easy);
+          //curl_easy_cleanup (conn->easy);
           conn_free (conn);
           close (sockfd);
         }
@@ -202,7 +245,7 @@ static void cb_send (int sockfd, short revents, void* user_data)
     else
     {
       c_log_critical ("send() failed: %s", strerror (errno));
-      c_loop_remove_fd (conn->fcgi->loop, sockfd);
+      c_loop_remove_fd (conn->fasyn->loop, sockfd);
       conn_free (conn);
       close (sockfd);
     }
@@ -212,12 +255,12 @@ static void cb_send (int sockfd, short revents, void* user_data)
 static void cb_incoming (int sockfd, short revents, void* user_data)
 {
   c_log_info ("cb_incoming from %d", sockfd);
-  Conn* conn = user_data;
+  FasynConn* conn = user_data;
 
   if (revents & (POLLHUP | POLLERR))
   {
     c_log_critical ("POLLHUP | POLLERR");
-    c_loop_remove_fd (conn->fcgi->loop, sockfd);
+    c_loop_remove_fd (conn->fasyn->loop, sockfd);
     conn_free (conn);
     close (sockfd);
     return;
@@ -277,8 +320,8 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
         {
           conn->state = SEND_STDOUT;
           conn->pos = 0;
-           c_loop_remove_fd (conn->fcgi->loop, sockfd);
-          c_loop_add_fd (conn->fcgi->loop, sockfd, POLLOUT, cb_send, conn);
+          c_loop_remove_fd (conn->fasyn->loop, sockfd);
+          c_loop_add_fd (conn->fasyn->loop, sockfd, POLLOUT, cb_send, conn);
         }
       }
       else // RECV_CONTENT
@@ -352,7 +395,7 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
        The value 0 may also be returned if the requested number of bytes
        to receive from a stream socket was 0.
      */
-    c_loop_remove_fd (conn->fcgi->loop, sockfd);
+    c_loop_remove_fd (conn->fasyn->loop, sockfd);
     conn_free (conn);
     close (sockfd);
   }
@@ -367,7 +410,7 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
     else
     {
       c_log_critical ("%s", strerror (errno));
-      c_loop_remove_fd (conn->fcgi->loop, sockfd);
+      c_loop_remove_fd (conn->fasyn->loop, sockfd);
       conn_free (conn);
       close (sockfd);
     }
@@ -376,100 +419,270 @@ static void cb_incoming (int sockfd, short revents, void* user_data)
 
 static void cb_new_req (int sockfd, short revents, void* user_data)
 {
-  printf ("%ld cb_new_req\n", time (NULL));
-  Fcgi* fcgi = user_data;
+  printf ("%ld cb_new_req\n", time (nullptr));
+  Fasyn* fasyn = user_data;
 
   if (revents & (POLLHUP | POLLERR))
   {
     c_log_critical ("A connection could not be established.");
-    c_loop_remove_fd (fcgi->loop, sockfd);
+    c_loop_remove_fd (fasyn->loop, sockfd);
     return;
   }
 
   int client_fd;
-  socklen_t addr_len = sizeof (fcgi->addr);
+  socklen_t addr_len = sizeof (fasyn->addr);
 
-  if ((client_fd = accept4 (sockfd, (struct sockaddr*) &fcgi->addr,
+  if ((client_fd = accept4 (sockfd, (struct sockaddr*) &fasyn->addr,
                             &addr_len, SOCK_NONBLOCK)) < 0)
   {
     c_log_critical ("accept4() failed");
-    c_loop_remove_fd (fcgi->loop, sockfd);
+    c_loop_remove_fd (fasyn->loop, sockfd);
     return;
   }
 
-  Conn* conn = conn_new (fcgi);
-  c_loop_add_fd (fcgi->loop, client_fd, POLLIN, cb_incoming, conn);
+  FasynConn* conn = conn_new (fasyn);
+  c_loop_add_fd (fasyn->loop, client_fd, POLLIN, cb_incoming, conn);
 }
 
-Fcgi* fcgi_new (int argc, char** argv)
+static void cb_socket_event (int fd, short cond, void* user_data)
 {
-  Fcgi* fcgi = c_calloc (1, sizeof (Fcgi));
+  c_log_info ("cb_socket_event");
+  Fasyn* fasyn = user_data;
 
-  if ((fcgi->sockfd = socket (AF_UNIX, SOCK_STREAM, 0)) < 0)
+  if (cond & (POLLERR | POLLHUP | POLLNVAL))
+  {
+    c_log_info ("cond & (POLLERR | POLLHUP | POLLNVAL)");
+    c_loop_remove_fd (fasyn->loop, fd);
+    close (fd);
+    return;
+  }
+
+  int curl_cond = 0;
+
+  if (cond & (POLLIN | POLLPRI))
+    curl_cond |= CURL_CSELECT_IN;
+  if (cond & POLLOUT)
+    curl_cond |= CURL_CSELECT_OUT;
+
+  CURLMcode code1;
+  code1 = curl_multi_socket_action (fasyn->multi, fd, curl_cond,
+                                    &fasyn->n_runnings);
+
+  if (code1 != CURLM_OK)
+  {
+    c_log_info ("code1 != CURLM_OK");
+    c_loop_remove_fd (fasyn->loop, fd);
+    close (fd);
+    return;
+  }
+
+  CURLMsg* msg;
+  int      msgs_left;
+
+  while ((msg = curl_multi_info_read (fasyn->multi, &msgs_left)))
+  {
+    if (msg->msg == CURLMSG_DONE)
+    {
+      FasynConn* conn;
+      CURLcode code2;
+      CURL *easy = msg->easy_handle;
+      code2 = curl_easy_getinfo (easy, CURLINFO_PRIVATE, &conn);
+      if (code2 != CURLE_OK)
+      {
+        c_log_critical ("%s", curl_easy_strerror (code2));
+        break;
+      }
+
+      code2 = msg->data.result;
+      if (code2 != CURLE_OK && easy != conn->easy)
+      {
+        c_log_info ("%s", curl_easy_strerror (code2));
+        break;
+      }
+
+      // 100% OK
+      if (conn->easy == easy)
+      {
+        curl_multi_remove_handle (fasyn->multi, conn->easy);
+        curl_easy_cleanup (conn->easy);
+        conn->easy = nullptr;
+      }
+    }
+  }
+
+  if (fasyn->n_runnings)
+    return;
+
+  c_loop_remove_timer (fasyn->loop, fasyn->timer_fd);
+  fasyn->timer_fd = -1;
+  c_loop_remove_fd (fasyn->loop, fd);
+  close (fd);
+}
+
+static int cb_update_socket (CURL          *easy,
+                             curl_socket_t  s,
+                             int            action,
+                             Fasyn*         fasyn,
+                             void*          added)
+{
+  if (action == CURL_POLL_REMOVE)
+  {
+    c_loop_remove_fd (fasyn->loop, s);
+    curl_multi_assign (fasyn->multi, s, nullptr);
+  }
+  else
+  {
+    if ((action & CURL_POLL_IN || action & CURL_POLL_OUT) && !added)
+    {
+      c_loop_add_fd (fasyn->loop, s, POLLIN, cb_socket_event, fasyn);
+      curl_multi_assign (fasyn->multi, s, &s);
+    }
+
+    short cond = ((action & CURL_POLL_IN) ?  POLLIN  : 0) |
+                 ((action & CURL_POLL_OUT) ? POLLOUT : 0);
+    c_loop_remove_fd (fasyn->loop, s);
+    //c_loop_mod_fd (fasyn->loop, s, cond, cb_socket_event, fasyn);
+    c_loop_add_fd (fasyn->loop, s, cond, cb_socket_event, fasyn);
+  }
+
+  return 0;
+}
+
+static void cb_timeout (void* user_data)
+{
+  c_log_info ("cb_timeout");
+  Fasyn* fasyn = user_data;
+  CURLMcode code = curl_multi_socket_action (fasyn->multi, CURL_SOCKET_TIMEOUT,
+                                             0, &fasyn->n_runnings);
+  if (code == CURLM_OK)
+  {
+    c_log_info ("code == CURLM_OK");
+    return;
+  }
+
+  c_log_warning ("%s", curl_multi_strerror (code));
+  c_loop_remove_timer (fasyn->loop, fasyn->timer_fd);
+  fasyn->timer_fd = -1;
+}
+
+static int cb_update_timeout (CURLM *multi, long timeout_ms, Fasyn* fasyn)
+{
+  c_log_info ("cb_update_timeout");
+  if (timeout_ms == -1)
+  {
+    c_log_info ("c_loop_remove_timer");
+    c_loop_remove_timer (fasyn->loop, fasyn->timer_fd);
+    fasyn->timer_fd = -1;
+    return 0;
+  }
+
+  c_log_info ("c_loop_remove_timer: fd %d", fasyn->timer_fd);
+  c_log_info ("c_loop_add_timer: %ld ms", timeout_ms);
+  c_loop_remove_timer (fasyn->loop, fasyn->timer_fd);
+  fasyn->timer_fd = c_loop_add_timer (fasyn->loop, timeout_ms, cb_timeout,
+                                      fasyn);
+
+  return 0;
+}
+
+Fasyn* fasyn_new (int argc, char** argv)
+{
+  Fasyn* fasyn = c_calloc (1, sizeof (Fasyn));
+
+  if ((fasyn->sockfd = socket (AF_UNIX, SOCK_STREAM, 0)) < 0)
   {
     c_log_critical ("socket() failed: %s", strerror (errno));
     goto FAIL;
   }
 
   int opt = 1;
-  if (setsockopt (fcgi->sockfd, SOL_SOCKET, SO_REUSEADDR, (char*) &opt,
+  if (setsockopt (fasyn->sockfd, SOL_SOCKET, SO_REUSEADDR, (char*) &opt,
       sizeof (opt)) < 0)
   {
     c_log_critical ("setsockopt() failed: %s", strerror (errno));
     goto FAIL;
   }
 
-  fcgi->addr.sun_family = AF_UNIX;
-  snprintf (fcgi->addr.sun_path, sizeof (fcgi->addr.sun_path), "%s", SOCK_PATH);
-
+  fasyn->addr.sun_family = AF_UNIX;
+  snprintf (fasyn->addr.sun_path, sizeof (fasyn->addr.sun_path), "%s",
+            SOCK_PATH);
   unlink (SOCK_PATH);
 
-  if (bind (fcgi->sockfd, (struct sockaddr*) &fcgi->addr,
-      sizeof (fcgi->addr)) < 0)
+  if (bind (fasyn->sockfd, (struct sockaddr*) &fasyn->addr,
+      sizeof (fasyn->addr)) < 0)
   {
     c_log_critical ("bind() failed: %s", strerror (errno));
     goto FAIL;
   }
 
-  if (listen (fcgi->sockfd, SOMAXCONN) < 0)
+  if (listen (fasyn->sockfd, SOMAXCONN) < 0)
   {
     c_log_critical ("listen() failed: %s", strerror (errno));
     goto FAIL;
   }
 
-  fcgi->loop = c_loop_new ();
-  c_loop_add_fd (fcgi->loop, fcgi->sockfd, POLLIN, cb_new_req, fcgi);
+  if (curl_global_init (CURL_GLOBAL_DEFAULT) != CURLE_OK)
+    c_log_critical ("curl_global_init failed");
 
-  return fcgi;
+  if (!(fasyn->multi = curl_multi_init ()))
+    c_log_critical ("curl_multi_init failed");
+
+  curl_multi_setopt (fasyn->multi, CURLMOPT_SOCKETFUNCTION, cb_update_socket);
+  curl_multi_setopt (fasyn->multi, CURLMOPT_SOCKETDATA,     fasyn);
+  curl_multi_setopt (fasyn->multi, CURLMOPT_TIMERFUNCTION,  cb_update_timeout);
+  curl_multi_setopt (fasyn->multi, CURLMOPT_TIMERDATA,      fasyn);
+
+  fasyn->loop = c_loop_new ();
+  fasyn->timer_fd = -1;
+  c_loop_add_fd (fasyn->loop, fasyn->sockfd, POLLIN, cb_new_req, fasyn);
+
+  return fasyn;
 
   FAIL:
-  fcgi_free (fcgi);
+  c_log_info ("FAIL: %p, fasyn: %p", nullptr, fasyn);
+  fasyn_free (fasyn);
   return nullptr;
 }
 
-void fcgi_free (Fcgi* fcgi)
+void fasyn_free (Fasyn* fasyn)
 {
-  if (!fcgi)
+  c_log_info ("fasyn_free: %p", fasyn);
+  if (!fasyn)
     return;
 
-  c_loop_remove_fd (fcgi->loop, fcgi->sockfd);
+  if (fasyn->loop)
+    c_loop_remove_fd (fasyn->loop, fasyn->sockfd);
 
-  if (fcgi->sockfd > -1)
-    close (fcgi->sockfd);
+  if (fasyn->sockfd > -1)
+    close (fasyn->sockfd);
 
-  c_loop_free (fcgi->loop);
-  free (fcgi);
+  c_loop_free (fasyn->loop);
+
+  if (fasyn->multi)
+    curl_multi_cleanup (fasyn->multi);
+
+  curl_global_cleanup ();
+
+  free (fasyn);
 }
 
-int fcgi_run (Fcgi* fcgi)
+int fasyn_run (Fasyn* fasyn)
 {
-  if (fcgi)
-    return c_loop_run (fcgi->loop);
+  if (fasyn)
+    return c_loop_run (fasyn->loop);
   else
     return 1;
 }
 
-void fcgi_quit (Fcgi* fcgi)
+void fasyn_quit (Fasyn* fasyn)
 {
-  c_loop_quit (fcgi->loop);
+  c_loop_quit (fasyn->loop);
+}
+
+void fasyn_set_cb_outgoing (Fasyn* fasyn,
+                            FasynCallback cb_outgoing,
+                            void* cb_outgoing_user_data)
+{
+  fasyn->cb_outgoing = cb_outgoing;
+  fasyn->cb_outgoing_user_data = cb_outgoing_user_data;
 }
