@@ -22,20 +22,99 @@
 #include "c-macros.h"
 #include "c-loop.h"
 #include <sys/un.h>
+#include <curl/curl.h>
+#include "c-evq.h"
 
 C_BEGIN_DECLS
 
-typedef struct _Fasyn Fasyn;
+#define FASYN_MAX_BUF_SIZE  4096
+
+enum _FasynConnState : uint8_t {
+  FASYN_CONN_STATE_RECV_HEADER,
+  FASYN_CONN_STATE_RECV_CONTENT
+};
+typedef enum _FasynConnState FasynConnState;
+
+enum _FasynReqState : uint8_t {
+  FASYN_REQ_STATE_NONE = 0,
+  FASYN_REQ_STATE_RECV_HEADER  = 1 << 0,
+  FASYN_REQ_STATE_RECV_CONTENT = 1 << 1,
+  FASYN_REQ_STATE_SEND_STDOUT  = 1 << 2,
+  FASYN_REQ_STATE_SEND_END_REQ = 1 << 3,
+  FASYN_REQ_STATE_USER_FUNC    = 1 << 4
+};
+typedef enum _FasynReqState FasynReqState;
+
+typedef struct _CBuf  CBuf;
+struct _CBuf {
+  uint8_t* data;
+  size_t   capa;
+  size_t   len;
+  size_t   pos;
+  size_t   min;
+};
+
 typedef struct _FasynConn FasynConn;
-typedef void (*FasynCallback) (int fd, FasynConn* conn, void* user_data);
+typedef struct _FasynReq FasynReq;
+struct _FasynReq {
+  FasynConn* conn;
+
+  uint16_t id;
+  uint16_t role;
+  uint8_t  flags;
+
+  FasynReqState state; /* uint8_t */ /* FIXME 없어도 될 지도 모른다 */
+  void (*recv_func)     (FasynReq* req);
+  void (*complete_func) (FasynReq* req);
+  void (*error_func)    (FasynReq* req);
+};
+
+typedef void (*FasynCallback) (int fd, FasynReq* req, void* user_data);
+
+typedef struct _Fasyn Fasyn;
+struct _Fasyn {
+  CLoop* loop;
+  int    listen_fd;
+  struct sockaddr_un addr;
+  CURLM* multi;
+  int    n_runnings;
+  int    timer_fd;
+  FasynCallback cb_request;
+  void* cb_request_user_data;
+};
+
+typedef struct _FasynHeader FasynHeader;
+struct _FasynHeader {
+  uint8_t  version;
+  uint8_t  type;
+  uint16_t req_id;
+  uint16_t content_len;
+  uint8_t  padding_len;
+  uint8_t  reserved;
+};
+
+struct _FasynConn {
+  Fasyn*   fasyn;
+  CHashMap* reqs;
+  FasynHeader header; // 받기만 한다
+  CBuf* cbuf; // 받기만 한다
+  CBuf* cbuf2; // 송신 큐에서 가져온 버퍼를 임시로 가지고 있는다.
+  CEvQueue* evq; // 송신 큐
+  int fd;
+  FasynConnState state; /* uint8_t */
+};
 
 Fasyn* fasyn_new  (int argc, char** argv);
 void   fasyn_free (Fasyn* fasyn);
 int    fasyn_run  (Fasyn* fasyn);
 void   fasyn_quit (Fasyn* fasyn);
-void   fasyn_set_cb_outgoing (Fasyn* fasyn,
-                              FasynCallback cb_outgoing,
-                              void* cb_outgoing_user_data);
+void   fasyn_set_cb_request (Fasyn* fasyn,
+                             FasynCallback cb_request,
+                             void* cb_request_user_data);
+
+// FIXME
+void   fasyn_req_stdout (FasynReq* req);
+void   fasyn_req_end (FasynReq* req);
 
 C_END_DECLS
 
