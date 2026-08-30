@@ -1,0 +1,30 @@
+-- ============================================================================
+-- fasyn_tests.gpr
+-- Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
+-- ============================================================================
+with "fasyn";
+with "clair_test_runtime.gpr";
+with "clair_config.gpr";
+
+project Fasyn_Tests is
+
+  for Languages use ("Ada", "C");
+  for Source_Dirs use
+    ("tests", "tests/native", "src/runtime", "build/tests/generated");
+  for Object_Dir use "build/tests/obj";
+  for Exec_Dir use "build/tests/bin";
+  for Create_Missing_Dirs use "True";
+  for Main use
+    ("fasyn_unit_tests.adb",
+     "fasyn_classic_fixture.adb",
+     "fasyn_nginx_fixture.adb");
+
+  package Compiler is
+    for Default_Switches ("Ada") use
+      ("-gnat2022", "-gnatwa", "-gnatW8", "-gnatwe", "-O0");
+    for Default_Switches ("C") use ("-Werror");
+  end Compiler;
+
+  package Linker renames Clair_Config.Linker;
+
+end Fasyn_Tests;
