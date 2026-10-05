@@ -13,10 +13,11 @@ with Clair.Status;
 with Clair.Test.Assertions;
 with Fasyn.Protocol;
 with Fasyn.Protocol.Codec;
-with Fasyn.Protocol.Messages;
+with Fasyn.Protocol.Bodies;
 with Fasyn.Protocol.Name_Values;
 with Fasyn.Request;
 with Fasyn.Request.Connection;
+with Fasyn.Request.Connection.Testing;
 with Fasyn.Request.Execution;
 with Fasyn.Request.Testing;
 
@@ -26,10 +27,11 @@ package body Tests.Authorizer is
   package A renames Clair.Test.Assertions;
   package P renames Fasyn.Protocol;
   package C renames Fasyn.Protocol.Codec;
-  package M renames Fasyn.Protocol.Messages;
+  package B renames Fasyn.Protocol.Bodies;
   package N renames Fasyn.Protocol.Name_Values;
   package R renames Fasyn.Request;
   package RC renames Fasyn.Request.Connection;
+  package RCT renames Fasyn.Request.Connection.Testing;
   package E renames Fasyn.Request.Execution;
   package RT renames Fasyn.Request.Testing;
 
@@ -40,7 +42,7 @@ package body Tests.Authorizer is
   use type Clair.IO.Byte_Count;
   use type Clair.Status.Code;
   use type C.Decode_Status;
-  use type M.Body_Status;
+  use type B.Body_Status;
   use type N.Encode_Status;
   use type P.Role;
   use type R.Input_Status;
@@ -82,55 +84,55 @@ package body Tests.Authorizer is
 
   overriding procedure on_parameter
     (self    : in out Authorizer_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array);
 
   overriding procedure on_params_end
     (self     : in out Authorizer_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_stdin
     (self     : in out Authorizer_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer);
 
   overriding procedure on_stdin_end
     (self     : in out Authorizer_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_parameter
     (self    : in out Authorizer_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array)
   is
     pragma Unreferenced (name, value);
   begin
     self.parameter_count := self.parameter_count + 1;
-    self.role_seen := R.request_role(context);
+    self.role_seen := R.role(context);
   end on_parameter;
 
   overriding procedure on_params_end
     (self     : in out Authorizer_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     write_status  : R.Write_Status;
     finish_status : R.Write_Status;
   begin
     self.params_end_seen := True;
-    self.role_seen := R.request_role(context);
+    self.role_seen := R.role(context);
 
     if not self.finish_on_params_end then
       return;
     end if;
 
-    R.write_stdout (response, AUTHORIZED_RESPONSE, write_status);
-    R.finish (response, self.application_status, finish_status);
+    write_status := R.write_stdout (response, AUTHORIZED_RESPONSE);
+    finish_status := R.finish (response, self.application_status);
     self.output_ok :=
       write_status = R.Write_Complete and then
       finish_status = R.Write_Complete;
@@ -138,7 +140,7 @@ package body Tests.Authorizer is
 
   overriding procedure on_stdin
     (self     : in out Authorizer_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer)
   is
@@ -149,7 +151,7 @@ package body Tests.Authorizer is
 
   overriding procedure on_stdin_end
     (self     : in out Authorizer_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (context, response);
@@ -161,17 +163,17 @@ package body Tests.Authorizer is
     (role_code : Interfaces.Unsigned_16;
      output    : out P.Byte_Array)
   is
-    request_body : constant M.Begin_Request_Body :=
+    request_body : constant B.Begin_Request_Body :=
       (role_code => role_code,
        flags     => P.KEEP_CONN);
     written : Natural;
-    status  : M.Body_Status;
+    status  : B.Body_Status;
   begin
-    M.encode_begin_request
-      (request_body, output, written, status);
+    status := B.encode_begin_request
+      (request_body, output, written);
 
-    if status /= M.Body_Complete or else
-       written /= M.BEGIN_REQUEST_BODY_LENGTH
+    if status /= B.Body_Complete or else
+       written /= B.BEGIN_REQUEST_BODY_LENGTH
     then
       raise Program_Error with "Authorizer BEGIN_REQUEST encoding failed";
     end if;
@@ -185,7 +187,7 @@ package body Tests.Authorizer is
     value  : constant P.Byte_Array := to_bytes ("alice");
     status : N.Encode_Status;
   begin
-    N.encode_pair (name, value, output, written, status);
+    status := N.encode_pair (name, value, output, written);
     if status /= N.Encode_Complete then
       raise Program_Error with "Authorizer PARAMS encoding failed";
     end if;
@@ -203,24 +205,23 @@ package body Tests.Authorizer is
       (version        => P.VERSION_1,
        record_type    => record_type,
        request_id     => 1,
-       content_length => P.Content_Length_Type(content'length),
-       padding_length => 0,
-       reserved       => 0);
+       content_length => P.Content_Length(content'length),
+       padding_length => 0);
   begin
-    R.begin_record (exchange, header, response, status);
+    status := R.begin_record (exchange, header, response);
     if status /= R.Input_Progress then
       return;
     end if;
 
     if content'length > 0 then
-      R.feed_content
-        (exchange, content, application, response, status);
+      status := R.feed_content
+        (exchange, content, application, response);
       if status /= R.Input_Progress then
         return;
       end if;
     end if;
 
-    R.end_record (exchange, application, response, status);
+    status := R.end_record (exchange, application, response);
   end drive_record;
 
   procedure append_record
@@ -233,9 +234,8 @@ package body Tests.Authorizer is
       (version        => P.VERSION_1,
        record_type    => record_type,
        request_id     => 1,
-       content_length => P.Content_Length_Type(content'length),
-       padding_length => 0,
-       reserved       => 0);
+       content_length => P.Content_Length(content'length),
+       padding_length => 0);
     bytes : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
   begin
     C.encode_header (header, bytes);
@@ -261,16 +261,16 @@ package body Tests.Authorizer is
   begin
     while position <= data'last loop
       status := Clair.IO.write
-        (fd     => fd,
-         buf    => data(position)'address,
-         count  => Interfaces.C.size_t(data'last - position + 1),
-         result => written);
+        (fd            => fd,
+         buffer        => data(position)'address,
+         count         => Clair.IO.Byte_Count(data'last - position + 1),
+         bytes_written => written);
 
       if status /= Clair.Status.OK then
         return status;
       end if;
 
-      if written <= 0 then
+      if written = 0 then
         return Clair.Status.END_OF_STREAM;
       end if;
 
@@ -354,7 +354,7 @@ package body Tests.Authorizer is
     for offset in bytes'range loop
       bytes(offset) := output(position + offset);
     end loop;
-    C.decode_header (bytes, header, decode_status);
+    decode_status := C.decode_header (bytes, header);
   end decode_header_at;
 
   procedure runtime_authorizer_success
@@ -368,7 +368,7 @@ package body Tests.Authorizer is
        max_name_bytes              => 64,
        max_value_bytes             => 64,
        max_request_output_bytes    => 512,
-       max_output_bytes            => 512,
+       max_connection_output_bytes => 512,
        read_buffer_bytes           => 128,
        write_chunk_bytes           => 128);
     runtime_raw   : aliased Interfaces.C.int := -1;
@@ -378,7 +378,7 @@ package body Tests.Authorizer is
     native_error  : Interfaces.C.int;
     status        : Clair.Status.Code;
     dispatched    : Boolean;
-    begin_bytes   : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes   : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     params        : P.Byte_Array (1 .. 64);
     params_written : Natural;
     empty         : P.Byte_Array (1 .. 0);
@@ -389,12 +389,12 @@ package body Tests.Authorizer is
     position      : Natural;
     header        : P.Header;
     decode_status : C.Decode_Status;
-    body_bytes    : P.Byte_Array (0 .. M.END_REQUEST_BODY_LENGTH - 1);
-    end_body      : M.End_Request_Body;
-    body_status   : M.Body_Status;
+    body_bytes    : P.Byte_Array (0 .. B.END_REQUEST_BODY_LENGTH - 1);
+    end_body      : B.End_Request_Body;
+    body_status   : B.Body_Status;
     content_ok    : Boolean := True;
   begin
-    encode_begin (P.AUTHORIZER_ROLE, begin_bytes);
+    encode_begin (P.AUTHORIZER_CODE, begin_bytes);
     encode_parameter (params, params_written);
 
     native_error := c_socketpair (runtime_raw'access, peer_raw'access);
@@ -424,27 +424,26 @@ package body Tests.Authorizer is
       (reporter, status = Clair.Status.OK,
        "Authorizer executor initializes");
 
-    status := RC.initialize
+    status := RCT.initialize_without_shared_admission
       (connection,
        event_loop'Unchecked_Access,
        runtime_fd,
        application'Unchecked_Access,
        executor'Unchecked_Access,
-       request_timeout => 60_000,
-       connection_id   => 30);
+       request_lifetime_timeout => 60_000);
     A.assert_true
       (reporter, status = Clair.Status.OK,
        "Authorizer connection initializes");
 
     append_record
-      (input, input_position, P.BEGIN_REQUEST_TYPE, begin_bytes);
+      (input, input_position, P.BEGIN_REQUEST, begin_bytes);
     append_record
       (input,
        input_position,
-       P.PARAMS_TYPE,
+       P.PARAMS,
        params(params'first .. params'first + params_written - 1));
     append_record
-      (input, input_position, P.PARAMS_TYPE, empty);
+      (input, input_position, P.PARAMS, empty);
 
     status := write_all
       (peer_fd, input(input'first .. input_position - 1));
@@ -459,7 +458,7 @@ package body Tests.Authorizer is
       exit when status /= Clair.Status.OK;
       read_available (peer_fd, output, output_length);
       exit when
-        RC.active_request_count(connection) = 0 and then
+        RC.active_requests(connection) = 0 and then
         RC.pending_output_bytes(connection) = 0 and then
         output_length > 0;
     end loop;
@@ -489,7 +488,7 @@ package body Tests.Authorizer is
     A.assert_true
       (reporter,
        decode_status = C.Complete and then
-       header.record_type = P.STDOUT_TYPE and then
+       header.record_type = P.STDOUT and then
        Natural(header.content_length) = AUTHORIZED_RESPONSE'length,
        "Authorizer emits CGI response on STDOUT");
 
@@ -520,7 +519,7 @@ package body Tests.Authorizer is
     A.assert_true
       (reporter,
        decode_status = C.Complete and then
-       header.record_type = P.STDOUT_TYPE and then
+       header.record_type = P.STDOUT and then
        header.content_length = 0,
        "Authorizer finish emits STDOUT EOF");
     position := position + P.HEADER_LENGTH;
@@ -530,7 +529,7 @@ package body Tests.Authorizer is
     A.assert_true
       (reporter,
        decode_status = C.Complete and then
-       header.record_type = P.STDERR_TYPE and then
+       header.record_type = P.STDERR and then
        header.content_length = 0,
        "Authorizer finish emits STDERR EOF");
     position := position + P.HEADER_LENGTH;
@@ -540,28 +539,28 @@ package body Tests.Authorizer is
     A.assert_true
       (reporter,
        decode_status = C.Complete and then
-       header.record_type = P.END_REQUEST_TYPE and then
-       Natural(header.content_length) = M.END_REQUEST_BODY_LENGTH,
+       header.record_type = P.END_REQUEST and then
+       Natural(header.content_length) = B.END_REQUEST_BODY_LENGTH,
        "Authorizer finish emits END_REQUEST");
 
     if decode_status = C.Complete and then
-       position + P.HEADER_LENGTH + M.END_REQUEST_BODY_LENGTH - 1 <=
+       position + P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH - 1 <=
          output'first + output_length - 1
     then
       for offset in body_bytes'range loop
         body_bytes(offset) :=
           output(position + P.HEADER_LENGTH + offset);
       end loop;
-      M.decode_end_request (body_bytes, end_body, body_status);
+      body_status := B.decode_end_request (body_bytes, end_body);
     else
-      body_status := M.Invalid_Body_Length;
+      body_status := B.Invalid_Body_Length;
     end if;
 
     A.assert_true
       (reporter,
-       body_status = M.Body_Complete and then
+       body_status = B.Body_Complete and then
        end_body.application_status = 0 and then
-       end_body.protocol_status_code = P.REQUEST_COMPLETE_STATUS,
+       end_body.protocol_status_code = P.REQUEST_COMPLETE,
        "Authorizer completes with REQUEST_COMPLETE");
 
     status := RC.finalize (connection);
@@ -593,23 +592,23 @@ package body Tests.Authorizer is
       (max_name_bytes => 64, max_value_bytes => 64);
     application : Authorizer_Application;
     response : R.Writer (max_output_bytes => 256);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     empty : P.Byte_Array (1 .. 0);
     status : R.Input_Status;
   begin
     application.finish_on_params_end := False;
-    encode_begin (P.AUTHORIZER_ROLE, begin_bytes);
+    encode_begin (P.AUTHORIZER_CODE, begin_bytes);
 
     drive_record
       (exchange, application, response,
-       P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+       P.BEGIN_REQUEST, begin_bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Authorizer BEGIN_REQUEST is accepted");
 
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, empty, status);
+       P.PARAMS, empty, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Authorizer PARAMS EOF completes input");
@@ -619,7 +618,7 @@ package body Tests.Authorizer is
 
     drive_record
       (exchange, application, response,
-       P.STDIN_TYPE, empty, status);
+       P.STDIN, empty, status);
     A.assert_true
       (reporter, status = R.Invalid_Record_Type,
        "Authorizer rejects FCGI_STDIN");
@@ -635,23 +634,23 @@ package body Tests.Authorizer is
       (max_name_bytes => 64, max_value_bytes => 64);
     application : Authorizer_Application;
     response : R.Writer (max_output_bytes => 256);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     empty : P.Byte_Array (1 .. 0);
     status : R.Input_Status;
   begin
     application.application_status := 9;
-    encode_begin (P.AUTHORIZER_ROLE, begin_bytes);
+    encode_begin (P.AUTHORIZER_CODE, begin_bytes);
 
     drive_record
       (exchange, application, response,
-       P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+       P.BEGIN_REQUEST, begin_bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "application-status Authorizer begins");
 
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, empty, status);
+       P.PARAMS, empty, status);
     A.assert_true
       (reporter, status = R.Request_Complete,
        "Authorizer may complete at PARAMS EOF");
@@ -662,9 +661,9 @@ package body Tests.Authorizer is
       bytes : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
       header : P.Header;
       decode_status : C.Decode_Status;
-      body_bytes : P.Byte_Array (0 .. M.END_REQUEST_BODY_LENGTH - 1);
-      end_body : M.End_Request_Body;
-      body_status : M.Body_Status;
+      body_bytes : P.Byte_Array (0 .. B.END_REQUEST_BODY_LENGTH - 1);
+      end_body : B.End_Request_Body;
+      body_status : B.Body_Status;
       end_seen : Boolean := False;
     begin
       for index in output'range loop
@@ -675,7 +674,7 @@ package body Tests.Authorizer is
         for offset in bytes'range loop
           bytes(offset) := output(position + offset);
         end loop;
-        C.decode_header (bytes, header, decode_status);
+        decode_status := C.decode_header (bytes, header);
         A.assert_true
           (reporter, decode_status = C.Complete,
            "Authorizer direct output header decodes");
@@ -684,16 +683,16 @@ package body Tests.Authorizer is
           exit;
         end if;
 
-        if header.record_type = P.END_REQUEST_TYPE then
+        if header.record_type = P.END_REQUEST then
           for offset in body_bytes'range loop
             body_bytes(offset) :=
               output(position + P.HEADER_LENGTH + offset);
           end loop;
-          M.decode_end_request (body_bytes, end_body, body_status);
+          body_status := B.decode_end_request (body_bytes, end_body);
           end_seen :=
-            body_status = M.Body_Complete and then
+            body_status = B.Body_Complete and then
             end_body.application_status = 9 and then
-            end_body.protocol_status_code = P.REQUEST_COMPLETE_STATUS;
+            end_body.protocol_status_code = P.REQUEST_COMPLETE;
           exit;
         end if;
 

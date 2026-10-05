@@ -6,7 +6,7 @@ with Interfaces;
 with Clair.Test.Assertions;
 with Fasyn.Protocol;
 with Fasyn.Protocol.Codec;
-with Fasyn.Protocol.Messages;
+with Fasyn.Protocol.Bodies;
 with Fasyn.Protocol.Name_Values;
 with Fasyn.Request;
 with Fasyn.Request.Testing;
@@ -16,14 +16,14 @@ package body Tests.Responder is
   package A renames Clair.Test.Assertions;
   package P renames Fasyn.Protocol;
   package C renames Fasyn.Protocol.Codec;
-  package M renames Fasyn.Protocol.Messages;
+  package B renames Fasyn.Protocol.Bodies;
   package N renames Fasyn.Protocol.Name_Values;
   package R renames Fasyn.Request;
   package RT renames Fasyn.Request.Testing;
 
   use type Interfaces.Unsigned_32;
   use type C.Decode_Status;
-  use type M.Body_Status;
+  use type B.Body_Status;
   use type N.Encode_Status;
   use type R.Cancellation_Cause;
   use type R.Input_Status;
@@ -54,29 +54,29 @@ package body Tests.Responder is
 
   overriding procedure on_parameter
     (self    : in out Test_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array);
 
   overriding procedure on_params_end
     (self     : in out Test_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_stdin
     (self     : in out Test_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer);
 
   overriding procedure on_stdin_end
     (self     : in out Test_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_parameter
     (self    : in out Test_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array)
   is
@@ -89,7 +89,7 @@ package body Tests.Responder is
 
   overriding procedure on_params_end
     (self     : in out Test_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (context);
@@ -97,13 +97,13 @@ package body Tests.Responder is
     status : R.Write_Status;
   begin
     self.params_end_seen := True;
-    R.write_stdout (response, data, status);
+    status := R.write_stdout (response, data);
     self.early_write_ok := status = R.Write_Complete;
   end on_params_end;
 
   overriding procedure on_stdin
     (self     : in out Test_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer)
   is
@@ -114,7 +114,7 @@ package body Tests.Responder is
 
   overriding procedure on_stdin_end
     (self     : in out Test_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (context);
@@ -125,9 +125,9 @@ package body Tests.Responder is
     finish_status : R.Write_Status;
   begin
     self.stdin_end_seen := True;
-    R.write_stdout (response, stdout_data, stdout_status);
-    R.write_stderr (response, stderr_data, stderr_status);
-    R.finish (response, 17, finish_status);
+    stdout_status := R.write_stdout (response, stdout_data);
+    stderr_status := R.write_stderr (response, stderr_data);
+    finish_status := R.finish (response, 17);
 
     self.final_write_ok :=
       stdout_status = R.Write_Complete and then
@@ -141,12 +141,12 @@ package body Tests.Responder is
 
   overriding procedure on_params_end
     (self     : in out Failing_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_params_end
     (self     : in out Failing_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (self, context, response);
@@ -166,25 +166,24 @@ package body Tests.Responder is
       (version        => P.VERSION_1,
        record_type    => record_type,
        request_id     => 1,
-       content_length => P.Content_Length_Type(content'length),
-       padding_length => 0,
-       reserved       => 0);
+       content_length => P.Content_Length(content'length),
+       padding_length => 0);
   begin
-    R.begin_record (exchange, record_header, response, status);
+    status := R.begin_record (exchange, record_header, response);
 
     if status /= R.Input_Progress then
       return;
     end if;
 
     if content'length > 0 then
-      R.feed_content (exchange, content, handler, response, status);
+      status := R.feed_content (exchange, content, handler, response);
 
       if status /= R.Input_Progress then
         return;
       end if;
     end if;
 
-    R.end_record (exchange, handler, response, status);
+    status := R.end_record (exchange, handler, response);
   end drive_record;
 
   procedure decode_next_header
@@ -205,7 +204,7 @@ package body Tests.Responder is
       header_bytes(offset) := bytes(position + offset);
     end loop;
 
-    C.decode_header (header_bytes, record_header, status);
+    status := C.decode_header (header_bytes, record_header);
     A.assert_true
       (reporter, status = C.Complete, "response record header decodes");
     A.assert_equal_integer
@@ -225,12 +224,12 @@ package body Tests.Responder is
     handler  : Test_Application;
     response : R.Writer (max_output_bytes => 256);
 
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE,
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE,
        flags     => P.KEEP_CONN);
-    begin_bytes  : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes  : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     begin_written : Natural;
-    body_status  : M.Body_Status;
+    body_status  : B.Body_Status;
 
     name  : constant P.Byte_Array := to_bytes ("REQUEST_METHOD");
     value : constant P.Byte_Array := to_bytes ("POST");
@@ -244,30 +243,28 @@ package body Tests.Responder is
     empty      : P.Byte_Array (1 .. 0);
     status     : R.Input_Status;
   begin
-    M.encode_begin_request
+    body_status := B.encode_begin_request
       (request_body => begin_body,
        output       => begin_bytes,
-       written      => begin_written,
-       status       => body_status);
+       written      => begin_written);
     A.assert_true
       (reporter,
-       body_status = M.Body_Complete and then
-       begin_written = M.BEGIN_REQUEST_BODY_LENGTH,
+       body_status = B.Body_Complete and then
+       begin_written = B.BEGIN_REQUEST_BODY_LENGTH,
        "BEGIN_REQUEST body encodes");
 
     drive_record
-      (exchange, handler, response, P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+      (exchange, handler, response, P.BEGIN_REQUEST, begin_bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete, "BEGIN_REQUEST is accepted");
     A.assert_true
       (reporter, R.keep_connection(exchange), "KEEP_CONN is preserved");
 
-    N.encode_pair
+    encode_status := N.encode_pair
       (name    => name,
        value   => value,
        output  => params,
-       written => params_written,
-       status  => encode_status);
+       written => params_written);
     A.assert_true
       (reporter,
        encode_status = N.Encode_Complete and then params_written = params_size,
@@ -277,7 +274,7 @@ package body Tests.Responder is
       (exchange,
        handler,
        response,
-       P.PARAMS_TYPE,
+       P.PARAMS,
        params(params'first .. params'first + 2),
        status);
     A.assert_true
@@ -289,7 +286,7 @@ package body Tests.Responder is
       (exchange,
        handler,
        response,
-       P.PARAMS_TYPE,
+       P.PARAMS,
        params(params'first + 3 .. params'last),
        status);
     A.assert_true
@@ -298,7 +295,7 @@ package body Tests.Responder is
        "fragmented PARAMS second record completes");
 
     drive_record
-      (exchange, handler, response, P.PARAMS_TYPE, empty, status);
+      (exchange, handler, response, P.PARAMS, empty, status);
     A.assert_true
       (reporter, status = R.Record_Complete, "PARAMS EOF completes stream");
     A.assert_equal_natural
@@ -321,14 +318,14 @@ package body Tests.Responder is
        "application can write after PARAMS EOF before STDIN EOF");
 
     drive_record
-      (exchange, handler, response, P.STDIN_TYPE, stdin_data, status);
+      (exchange, handler, response, P.STDIN, stdin_data, status);
     A.assert_true
       (reporter, status = R.Record_Complete, "STDIN content is accepted");
     A.assert_equal_natural
       (reporter, handler.stdin_bytes, 3, "STDIN is delivered incrementally");
 
     drive_record
-      (exchange, handler, response, P.STDIN_TYPE, empty, status);
+      (exchange, handler, response, P.STDIN, empty, status);
     A.assert_true
       (reporter, status = R.Request_Complete, "STDIN EOF completes request");
     A.assert_true
@@ -344,9 +341,9 @@ package body Tests.Responder is
       output : P.Byte_Array (1 .. RT.output_length(response));
       position : Natural := output'first;
       record_header : P.Header;
-      end_body_bytes : P.Byte_Array (0 .. M.END_REQUEST_BODY_LENGTH - 1);
-      end_body : M.End_Request_Body;
-      end_status : M.Body_Status;
+      end_body_bytes : P.Byte_Array (0 .. B.END_REQUEST_BODY_LENGTH - 1);
+      end_body : B.End_Request_Body;
+      end_status : B.Body_Status;
     begin
       for index in output'range loop
         output(index) := RT.output_byte (response, index);
@@ -354,7 +351,7 @@ package body Tests.Responder is
 
       decode_next_header (reporter, output, position, record_header);
       A.assert_equal_integer
-        (reporter, Integer(record_header.record_type), Integer(P.STDOUT_TYPE),
+        (reporter, Integer(record_header.record_type), Integer(P.STDOUT),
          "PARAMS callback emits STDOUT");
       A.assert_equal_integer
         (reporter, Integer(record_header.content_length), 1,
@@ -366,7 +363,7 @@ package body Tests.Responder is
 
       decode_next_header (reporter, output, position, record_header);
       A.assert_equal_integer
-        (reporter, Integer(record_header.record_type), Integer(P.STDOUT_TYPE),
+        (reporter, Integer(record_header.record_type), Integer(P.STDOUT),
          "final callback emits STDOUT");
       A.assert_equal_integer
         (reporter, Integer(record_header.content_length), 1,
@@ -378,7 +375,7 @@ package body Tests.Responder is
 
       decode_next_header (reporter, output, position, record_header);
       A.assert_equal_integer
-        (reporter, Integer(record_header.record_type), Integer(P.STDERR_TYPE),
+        (reporter, Integer(record_header.record_type), Integer(P.STDERR),
          "final callback emits STDERR");
       A.assert_equal_integer
         (reporter, Integer(record_header.content_length), 1,
@@ -390,7 +387,7 @@ package body Tests.Responder is
 
       decode_next_header (reporter, output, position, record_header);
       A.assert_equal_integer
-        (reporter, Integer(record_header.record_type), Integer(P.STDOUT_TYPE),
+        (reporter, Integer(record_header.record_type), Integer(P.STDOUT),
          "finish emits STDOUT EOF");
       A.assert_equal_integer
         (reporter, Integer(record_header.content_length), 0,
@@ -398,7 +395,7 @@ package body Tests.Responder is
 
       decode_next_header (reporter, output, position, record_header);
       A.assert_equal_integer
-        (reporter, Integer(record_header.record_type), Integer(P.STDERR_TYPE),
+        (reporter, Integer(record_header.record_type), Integer(P.STDERR),
          "finish emits STDERR EOF");
       A.assert_equal_integer
         (reporter, Integer(record_header.content_length), 0,
@@ -408,22 +405,22 @@ package body Tests.Responder is
       A.assert_equal_integer
         (reporter,
          Integer(record_header.record_type),
-         Integer(P.END_REQUEST_TYPE),
+         Integer(P.END_REQUEST),
          "finish emits END_REQUEST");
       A.assert_equal_integer
         (reporter,
          Integer(record_header.content_length),
-         M.END_REQUEST_BODY_LENGTH,
+         B.END_REQUEST_BODY_LENGTH,
          "END_REQUEST body has required length");
 
       for offset in end_body_bytes'range loop
         end_body_bytes(offset) := output(position + offset);
       end loop;
-      position := position + M.END_REQUEST_BODY_LENGTH;
+      position := position + B.END_REQUEST_BODY_LENGTH;
 
-      M.decode_end_request (end_body_bytes, end_body, end_status);
+      end_status := B.decode_end_request (end_body_bytes, end_body);
       A.assert_true
-        (reporter, end_status = M.Body_Complete, "END_REQUEST body decodes");
+        (reporter, end_status = B.Body_Complete, "END_REQUEST body decodes");
       A.assert_equal_integer
         (reporter,
          Integer(end_body.application_status),
@@ -432,7 +429,7 @@ package body Tests.Responder is
       A.assert_equal_integer
         (reporter,
          Integer(end_body.protocol_status_code),
-         Integer(P.REQUEST_COMPLETE_STATUS),
+         Integer(P.REQUEST_COMPLETE),
          "protocol status is REQUEST_COMPLETE");
       A.assert_equal_natural
         (reporter,
@@ -450,32 +447,37 @@ package body Tests.Responder is
        max_value_bytes => 64);
     handler  : Test_Application;
     response : R.Writer (max_output_bytes => 128);
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE,
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE,
        flags     => 0);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     written     : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     partial     : constant P.Byte_Array := [0 => 3];
     empty       : P.Byte_Array (1 .. 0);
     status      : R.Input_Status;
   begin
-    M.encode_begin_request
-      (begin_body, begin_bytes, written, body_status);
+    body_status := B.encode_begin_request
+      (begin_body, begin_bytes, written);
+    A.assert_true
+      (reporter,
+       body_status = B.Body_Complete and then
+       written = B.BEGIN_REQUEST_BODY_LENGTH,
+       "partial PARAMS BEGIN_REQUEST fixture encodes");
     drive_record
-      (exchange, handler, response, P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+      (exchange, handler, response, P.BEGIN_REQUEST, begin_bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete, "BEGIN_REQUEST is accepted");
 
     drive_record
-      (exchange, handler, response, P.PARAMS_TYPE, partial, status);
+      (exchange, handler, response, P.PARAMS, partial, status);
     A.assert_true
       (reporter,
        status = R.Record_Complete,
        "partial PARAMS record is accepted");
 
     drive_record
-      (exchange, handler, response, P.PARAMS_TYPE, empty, status);
+      (exchange, handler, response, P.PARAMS, empty, status);
     A.assert_true
       (reporter,
        status = R.Malformed_Params,
@@ -488,19 +490,19 @@ package body Tests.Responder is
     exchange : R.Exchange (max_name_bytes => 64, max_value_bytes => 64);
     handler  : Test_Application;
     response : R.Writer (max_output_bytes => 128);
-    begin_body : constant M.Begin_Request_Body :=
+    begin_body : constant B.Begin_Request_Body :=
       (role_code => 99, flags => P.KEEP_CONN);
-    bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     written : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     status : R.Input_Status;
   begin
-    M.encode_begin_request (begin_body, bytes, written, body_status);
+    body_status := B.encode_begin_request (begin_body, bytes, written);
     A.assert_true
-      (reporter, body_status = M.Body_Complete,
+      (reporter, body_status = B.Body_Complete,
        "unknown-role BEGIN_REQUEST encodes");
     drive_record
-      (exchange, handler, response, P.BEGIN_REQUEST_TYPE, bytes, status);
+      (exchange, handler, response, P.BEGIN_REQUEST, bytes, status);
     A.assert_true
       (reporter, status = R.Request_Complete,
        "unknown role completes without entering an application role");
@@ -511,8 +513,8 @@ package body Tests.Responder is
       output : P.Byte_Array (1 .. RT.output_length(response));
       position : Natural := output'first;
       record_header : P.Header;
-      body_bytes : P.Byte_Array (0 .. M.END_REQUEST_BODY_LENGTH - 1);
-      end_body : M.End_Request_Body;
+      body_bytes : P.Byte_Array (0 .. B.END_REQUEST_BODY_LENGTH - 1);
+      end_body : B.End_Request_Body;
     begin
       for index in output'range loop
         output(index) := RT.output_byte (response, index);
@@ -520,17 +522,17 @@ package body Tests.Responder is
       decode_next_header (reporter, output, position, record_header);
       A.assert_equal_integer
         (reporter, Integer(record_header.record_type),
-         Integer(P.END_REQUEST_TYPE), "unknown role emits END_REQUEST");
+         Integer(P.END_REQUEST), "unknown role emits END_REQUEST");
       for offset in body_bytes'range loop
         body_bytes(offset) := output(position + offset);
       end loop;
-      M.decode_end_request (body_bytes, end_body, body_status);
+      body_status := B.decode_end_request (body_bytes, end_body);
       A.assert_true
-        (reporter, body_status = M.Body_Complete,
+        (reporter, body_status = B.Body_Complete,
          "unknown-role END_REQUEST decodes");
       A.assert_equal_integer
         (reporter, Integer(end_body.protocol_status_code),
-         Integer(P.UNKNOWN_ROLE_STATUS),
+         Integer(P.UNKNOWN_ROLE),
          "unknown role reports FCGI_UNKNOWN_ROLE");
     end;
   end unknown_role_result;
@@ -542,49 +544,100 @@ package body Tests.Responder is
     handler : Test_Application;
     response : R.Writer (max_output_bytes => 128);
     empty : P.Byte_Array (1 .. 0);
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE, flags => 0);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => 0);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     written : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     status : R.Input_Status;
   begin
-    drive_record (exchange, handler, response, P.PARAMS_TYPE, empty, status);
+    drive_record (exchange, handler, response, P.PARAMS, empty, status);
     A.assert_true
       (reporter, status = R.Ignored_Inactive,
        "PARAMS for an inactive request is ignored");
-    drive_record (exchange, handler, response, P.STDIN_TYPE, empty, status);
+    drive_record (exchange, handler, response, P.STDIN, empty, status);
     A.assert_true
       (reporter, status = R.Ignored_Inactive,
        "STDIN for an inactive request is ignored");
     drive_record
-      (exchange, handler, response, P.ABORT_REQUEST_TYPE, empty, status);
+      (exchange, handler, response, P.ABORT_REQUEST, empty, status);
     A.assert_true
       (reporter, status = R.Ignored_Inactive,
        "ABORT_REQUEST for an inactive request is ignored");
 
-    M.encode_begin_request (begin_body, begin_bytes, written, body_status);
+    body_status := B.encode_begin_request (begin_body, begin_bytes, written);
+    A.assert_true
+      (reporter,
+       body_status = B.Body_Complete and then
+       written = B.BEGIN_REQUEST_BODY_LENGTH,
+       "inactive-record BEGIN_REQUEST fixture encodes");
     drive_record
-      (exchange, handler, response, P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+      (exchange, handler, response, P.BEGIN_REQUEST, begin_bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "ignored inactive records do not poison later request reuse");
   end inactive_records_are_ignored;
 
+  procedure zero_parameter_bounds
+    (reporter : in out Clair.Test.Reporter.Context)
+  is
+    exchange : R.Exchange (max_name_bytes => 0, max_value_bytes => 0);
+    handler  : Test_Application;
+    response : R.Writer (max_output_bytes => 128);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => 0);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
+    empty_pair  : constant P.Byte_Array := [0, 0];
+    written     : Natural;
+    body_status : B.Body_Status;
+    status      : R.Input_Status;
+  begin
+    body_status := B.encode_begin_request
+      (begin_body, begin_bytes, written);
+    A.assert_true
+      (reporter, body_status = B.Body_Complete,
+       "zero-bound exchange BEGIN_REQUEST encodes");
+    drive_record
+      (exchange, handler, response, P.BEGIN_REQUEST, begin_bytes, status);
+    A.assert_true
+      (reporter, status = R.Record_Complete,
+       "zero-bound exchange begins request");
+
+    drive_record
+      (exchange, handler, response, P.PARAMS, empty_pair, status);
+    A.assert_true
+      (reporter, status = R.Record_Complete,
+       "zero-bound exchange accepts an empty parameter pair");
+    A.assert_equal_natural
+      (reporter, handler.parameter_count, 1,
+       "zero-bound exchange dispatches the empty pair");
+    A.assert_equal_natural
+      (reporter, handler.parameter_name_length, 0,
+       "zero-bound exchange exposes an empty name");
+    A.assert_equal_natural
+      (reporter, handler.parameter_value_length, 0,
+       "zero-bound exchange exposes an empty value");
+  end zero_parameter_bounds;
+
   procedure writer_boundaries
     (reporter : in out Clair.Test.Reporter.Context)
   is
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE, flags => 0);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => 0);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     one_byte : constant P.Byte_Array := [1 => 16#41#];
     written : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     input_status : R.Input_Status;
     write_status : R.Write_Status;
   begin
-    M.encode_begin_request
-      (begin_body, begin_bytes, written, body_status);
+    body_status := B.encode_begin_request
+      (begin_body, begin_bytes, written);
+    A.assert_true
+      (reporter,
+       body_status = B.Body_Complete and then
+       written = B.BEGIN_REQUEST_BODY_LENGTH,
+       "writer BEGIN_REQUEST fixture encodes");
 
     declare
       exchange : R.Exchange (max_name_bytes => 1, max_value_bytes => 1);
@@ -592,16 +645,16 @@ package body Tests.Responder is
       response : R.Writer (max_output_bytes => 9);
     begin
       drive_record
-        (exchange, handler, response, P.BEGIN_REQUEST_TYPE,
+        (exchange, handler, response, P.BEGIN_REQUEST,
          begin_bytes, input_status);
-      R.write_stdout (response, one_byte, write_status);
+      write_status := R.write_stdout (response, one_byte);
       A.assert_true
         (reporter, write_status = R.Write_Complete,
          "writer accepts output exactly at its byte limit");
       A.assert_equal_natural
         (reporter, RT.output_length(response), 9,
          "exact-limit output accounts for record framing");
-      R.write_stdout (response, one_byte, write_status);
+      write_status := R.write_stdout (response, one_byte);
       A.assert_true
         (reporter, write_status = R.Output_Limit_Exceeded,
          "writer rejects output immediately above its limit");
@@ -613,15 +666,63 @@ package body Tests.Responder is
       response : R.Writer (max_output_bytes => 32);
     begin
       drive_record
-        (exchange, handler, response, P.BEGIN_REQUEST_TYPE,
+        (exchange, handler, response, P.BEGIN_REQUEST,
          begin_bytes, input_status);
-      R.finish (response, 0, write_status);
+      write_status := R.finish (response, 0);
       A.assert_true
         (reporter, write_status = R.Write_Complete,
          "request finalization fits exactly in 32 bytes");
       A.assert_equal_natural
         (reporter, RT.output_length(response), 32,
          "finalization emits two EOF headers plus END_REQUEST");
+    end;
+
+    declare
+      exchange : R.Exchange (max_name_bytes => 1, max_value_bytes => 1);
+      handler  : Test_Application;
+      response : R.Writer (max_output_bytes => 16);
+      header : constant P.Header :=
+        (version        => P.VERSION_1,
+         record_type    => P.STDOUT,
+         request_id     => 1,
+         content_length => 1,
+         padding_length => 0);
+      header_bytes : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
+    begin
+      drive_record
+        (exchange, handler, response, P.BEGIN_REQUEST,
+         begin_bytes, input_status);
+      write_status := R.write_stdout (response, one_byte);
+      A.assert_true
+        (reporter, write_status = R.Write_Complete,
+         "ring writer accepts initial framed byte");
+
+      RT.consume_output (response, 7);
+      write_status := R.write_stdout (response, one_byte);
+      A.assert_true
+        (reporter, write_status = R.Write_Complete,
+         "ring writer reuses consumed prefix without compaction");
+      A.assert_equal_natural
+        (reporter, RT.output_length(response), 11,
+         "ring writer tracks only pending bytes after reuse");
+
+      C.encode_header (header, header_bytes);
+      A.assert_equal_integer
+        (reporter, Integer(RT.output_byte(response, 1)), 0,
+         "ring writer preserves pending header suffix");
+      A.assert_equal_integer
+        (reporter, Integer(RT.output_byte(response, 2)), 16#41#,
+         "ring writer preserves pending content suffix");
+      for offset in header_bytes'range loop
+        A.assert_equal_integer
+          (reporter,
+           Integer(RT.output_byte(response, offset + 3)),
+           Integer(header_bytes(offset)),
+           "wrapped record header preserves byte order");
+      end loop;
+      A.assert_equal_integer
+        (reporter, Integer(RT.output_byte(response, 11)), 16#41#,
+         "wrapped record preserves content byte order");
     end;
   end writer_boundaries;
 
@@ -634,21 +735,26 @@ package body Tests.Responder is
       [for index in 1 .. 129 => P.Byte((index * 3) mod 256)];
     size : constant Natural := N.encoded_size(name'length, value'length);
     encoded : P.Byte_Array (0 .. size - 1);
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE, flags => 0);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => 0);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     empty : P.Byte_Array (1 .. 0);
     written : Natural;
     encode_status : N.Encode_Status;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     status : R.Input_Status;
   begin
-    N.encode_pair (name, value, encoded, written, encode_status);
+    encode_status := N.encode_pair (name, value, encoded, written);
     A.assert_true
       (reporter, encode_status = N.Encode_Complete and then written = size,
        "four-byte-length PARAMS fixture encodes");
-    M.encode_begin_request
-      (begin_body, begin_bytes, written, body_status);
+    body_status := B.encode_begin_request
+      (begin_body, begin_bytes, written);
+    A.assert_true
+      (reporter,
+       body_status = B.Body_Complete and then
+       written = B.BEGIN_REQUEST_BODY_LENGTH,
+       "fragmentation BEGIN_REQUEST fixture encodes");
 
     for split in 1 .. encoded'length - 1 loop
       declare
@@ -657,19 +763,19 @@ package body Tests.Responder is
         response : R.Writer (max_output_bytes => 128);
       begin
         drive_record
-          (exchange, handler, response, P.BEGIN_REQUEST_TYPE,
+          (exchange, handler, response, P.BEGIN_REQUEST,
            begin_bytes, status);
         drive_record
-          (exchange, handler, response, P.PARAMS_TYPE,
+          (exchange, handler, response, P.PARAMS,
            encoded(encoded'first .. encoded'first + split - 1), status);
         if status = R.Record_Complete then
           drive_record
-            (exchange, handler, response, P.PARAMS_TYPE,
+            (exchange, handler, response, P.PARAMS,
              encoded(encoded'first + split .. encoded'last), status);
         end if;
         if status = R.Record_Complete then
           drive_record
-            (exchange, handler, response, P.PARAMS_TYPE, empty, status);
+            (exchange, handler, response, P.PARAMS, empty, status);
         end if;
 
         A.assert_true
@@ -692,41 +798,44 @@ package body Tests.Responder is
     (reporter : in out Clair.Test.Reporter.Context)
   is
     handler : Test_Application;
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE, flags => 0);
-    bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => 0);
+    bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     written : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     status : R.Input_Status;
   begin
     declare
       exchange : R.Exchange (max_name_bytes => 64, max_value_bytes => 64);
       response : R.Writer (max_output_bytes => 128);
       header : constant P.Header :=
-        (version => P.VERSION_1, record_type => P.BEGIN_REQUEST_TYPE,
-         request_id => 1, content_length => 7, padding_length => 0,
-         reserved => 0);
+        (version => P.VERSION_1, record_type => P.BEGIN_REQUEST,
+         request_id => 1, content_length => 7, padding_length => 0);
     begin
-      R.begin_record (exchange, header, response, status);
+      status := R.begin_record (exchange, header, response);
       A.assert_true
         (reporter, status = R.Invalid_Content_Length,
          "BEGIN_REQUEST rejects a non-eight-byte body");
     end;
 
-    M.encode_begin_request (begin_body, bytes, written, body_status);
+    body_status := B.encode_begin_request (begin_body, bytes, written);
+    A.assert_true
+      (reporter,
+       body_status = B.Body_Complete and then
+       written = B.BEGIN_REQUEST_BODY_LENGTH,
+       "malformed-record BEGIN_REQUEST fixture encodes");
     declare
       exchange : R.Exchange (max_name_bytes => 64, max_value_bytes => 64);
       response : R.Writer (max_output_bytes => 128);
       header : constant P.Header :=
-        (version => P.VERSION_1, record_type => P.ABORT_REQUEST_TYPE,
-         request_id => 1, content_length => 1, padding_length => 0,
-         reserved => 0);
+        (version => P.VERSION_1, record_type => P.ABORT_REQUEST,
+         request_id => 1, content_length => 1, padding_length => 0);
     begin
       drive_record
-        (exchange, handler, response, P.BEGIN_REQUEST_TYPE, bytes, status);
+        (exchange, handler, response, P.BEGIN_REQUEST, bytes, status);
       A.assert_true
         (reporter, status = R.Record_Complete, "abort fixture begins");
-      R.begin_record (exchange, header, response, status);
+      status := R.begin_record (exchange, header, response);
       A.assert_true
         (reporter, status = R.Invalid_Content_Length,
          "FCGI_ABORT_REQUEST rejects nonempty content");
@@ -736,17 +845,22 @@ package body Tests.Responder is
   procedure invalid_responder_sequence
     (reporter : in out Clair.Test.Reporter.Context)
   is
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE, flags => 0);
-    bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => 0);
+    bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     empty : P.Byte_Array (1 .. 0);
     partial_four_byte_length : constant P.Byte_Array :=
       [16#80#, 0, 0];
     written : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     status : R.Input_Status;
   begin
-    M.encode_begin_request (begin_body, bytes, written, body_status);
+    body_status := B.encode_begin_request (begin_body, bytes, written);
+    A.assert_true
+      (reporter,
+       body_status = B.Body_Complete and then
+       written = B.BEGIN_REQUEST_BODY_LENGTH,
+       "invalid-sequence BEGIN_REQUEST fixture encodes");
 
     declare
       exchange : R.Exchange (max_name_bytes => 64, max_value_bytes => 64);
@@ -754,8 +868,8 @@ package body Tests.Responder is
       response : R.Writer (max_output_bytes => 128);
     begin
       drive_record
-        (exchange, handler, response, P.BEGIN_REQUEST_TYPE, bytes, status);
-      drive_record (exchange, handler, response, P.STDIN_TYPE, empty, status);
+        (exchange, handler, response, P.BEGIN_REQUEST, bytes, status);
+      drive_record (exchange, handler, response, P.STDIN, empty, status);
       A.assert_true
         (reporter, status = R.Invalid_Record_Sequence,
          "Responder rejects STDIN before PARAMS EOF");
@@ -767,9 +881,9 @@ package body Tests.Responder is
       response : R.Writer (max_output_bytes => 128);
     begin
       drive_record
-        (exchange, handler, response, P.BEGIN_REQUEST_TYPE, bytes, status);
-      drive_record (exchange, handler, response, P.PARAMS_TYPE, empty, status);
-      drive_record (exchange, handler, response, P.DATA_TYPE, empty, status);
+        (exchange, handler, response, P.BEGIN_REQUEST, bytes, status);
+      drive_record (exchange, handler, response, P.PARAMS, empty, status);
+      drive_record (exchange, handler, response, P.DATA, empty, status);
       A.assert_true
         (reporter, status = R.Invalid_Record_Type,
          "Responder rejects FCGI_DATA");
@@ -781,14 +895,14 @@ package body Tests.Responder is
       response : R.Writer (max_output_bytes => 128);
     begin
       drive_record
-        (exchange, handler, response, P.BEGIN_REQUEST_TYPE, bytes, status);
+        (exchange, handler, response, P.BEGIN_REQUEST, bytes, status);
       drive_record
-        (exchange, handler, response, P.PARAMS_TYPE,
+        (exchange, handler, response, P.PARAMS,
          partial_four_byte_length, status);
       A.assert_true
         (reporter, status = R.Record_Complete,
          "fragmented four-byte PARAMS length remains incremental");
-      drive_record (exchange, handler, response, P.PARAMS_TYPE, empty, status);
+      drive_record (exchange, handler, response, P.PARAMS, empty, status);
       A.assert_true
         (reporter, status = R.Malformed_Params,
          "PARAMS EOF rejects truncated four-byte length");
@@ -803,32 +917,32 @@ package body Tests.Responder is
        max_value_bytes => 64);
     handler  : Failing_Application;
     response : R.Writer (max_output_bytes => 128);
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE, flags => 0);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => 0);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     empty       : P.Byte_Array (1 .. 0);
     written     : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     status      : R.Input_Status;
     raised      : Boolean := False;
   begin
-    M.encode_begin_request
-      (begin_body, begin_bytes, written, body_status);
+    body_status := B.encode_begin_request
+      (begin_body, begin_bytes, written);
     A.assert_true
       (reporter,
-       body_status = M.Body_Complete and then
-       written = M.BEGIN_REQUEST_BODY_LENGTH,
+       body_status = B.Body_Complete and then
+       written = B.BEGIN_REQUEST_BODY_LENGTH,
        "callback failure BEGIN_REQUEST encodes");
 
     drive_record
-      (exchange, handler, response, P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+      (exchange, handler, response, P.BEGIN_REQUEST, begin_bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "callback failure request begins");
 
     begin
       drive_record
-        (exchange, handler, response, P.PARAMS_TYPE, empty, status);
+        (exchange, handler, response, P.PARAMS, empty, status);
     exception
       when Direct_Callback_Failure =>
         raised := True;
@@ -846,24 +960,24 @@ package body Tests.Responder is
       (max_name_bytes => 64, max_value_bytes => 64);
     handler : Test_Application;
     response : R.Writer (max_output_bytes => 128);
-    begin_body : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE, flags => P.KEEP_CONN);
-    bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_body : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => P.KEEP_CONN);
+    bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     empty : P.Byte_Array (1 .. 0);
     written : Natural;
-    body_status : M.Body_Status;
+    body_status : B.Body_Status;
     status : R.Input_Status;
   begin
-    M.encode_begin_request (begin_body, bytes, written, body_status);
+    body_status := B.encode_begin_request (begin_body, bytes, written);
     A.assert_true
-      (reporter, body_status = M.Body_Complete,
+      (reporter, body_status = B.Body_Complete,
        "abort fixture BEGIN_REQUEST encodes");
     drive_record
-      (exchange, handler, response, P.BEGIN_REQUEST_TYPE, bytes, status);
+      (exchange, handler, response, P.BEGIN_REQUEST, bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete, "abort fixture begins");
     drive_record
-      (exchange, handler, response, P.ABORT_REQUEST_TYPE, empty, status);
+      (exchange, handler, response, P.ABORT_REQUEST, empty, status);
     A.assert_true
       (reporter, status = R.Request_Complete,
        "FCGI_ABORT_REQUEST completes request");
@@ -887,11 +1001,11 @@ package body Tests.Responder is
     begin
       drive_record
         (timeout_exchange, timeout_handler, timeout_response,
-         P.BEGIN_REQUEST_TYPE, bytes, status);
+         P.BEGIN_REQUEST, bytes, status);
       A.assert_true
         (reporter, status = R.Record_Complete, "timeout fixture begins");
-      R.cancel
-        (timeout_exchange, timeout_response, R.Request_Timeout, status);
+      status := R.cancel
+        (timeout_exchange, timeout_response, R.Request_Timeout);
       A.assert_true
         (reporter, status = R.Request_Complete,
          "timeout cancellation completes request");
@@ -915,6 +1029,8 @@ package body Tests.Responder is
     Clair.Test.Reporter.run_scenario
       (reporter, "inactive records are ignored",
        inactive_records_are_ignored'access);
+    Clair.Test.Reporter.run_scenario
+      (reporter, "zero parameter bounds", zero_parameter_bounds'access);
     Clair.Test.Reporter.run_scenario
       (reporter, "writer boundaries", writer_boundaries'access);
     Clair.Test.Reporter.run_scenario

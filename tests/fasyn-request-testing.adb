@@ -9,16 +9,20 @@ package body Fasyn.Request.Testing is
     return self.length;
   end output_length;
 
+  procedure consume_output
+    (self  : in out Writer;
+     count : Natural)
+  is
+  begin
+    consume_buffered (self, count);
+  end consume_output;
+
   function output_byte
     (self  : Writer;
      index : Positive)
   return Fasyn.Protocol.Byte is
   begin
-    if index > self.length then
-      raise Constraint_Error with "request output byte index out of range";
-    end if;
-
-    return self.bytes(index);
+    return buffered_byte (self, index);
   end output_byte;
 
 end Fasyn.Request.Testing;

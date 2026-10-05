@@ -2,27 +2,33 @@
 -- fasyn-request.ads
 -- Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
 -- ============================================================================
-with Ada.Finalization;
+private with Ada.Finalization;
 with Interfaces;
 with Fasyn.Protocol;
-with Fasyn.Protocol.Messages;
-with Fasyn.Protocol.Name_Values;
+private with Fasyn.Protocol.Bodies;
+private with Fasyn.Protocol.Name_Values;
 
 package Fasyn.Request is
 
+  --! Runtime-assigned connection identity. Execution guarantees nonzero,
+  --! non-reused values within one executor Context lifetime domain; values from
+  --! independent executor Contexts are not a process-global identity namespace.
   type Connection_Identity is new Interfaces.Unsigned_64;
   NO_CONNECTION_IDENTITY : constant Connection_Identity := 0;
 
-  type Request_Generation is new Interfaces.Unsigned_64;
-  NO_GENERATION : constant Request_Generation := 0;
+  --! Nonzero request-generation identity within one connection lifetime.
+  --! Generations are never reused; exhaustion is terminal for new request
+  --! admission on that connection rather than wrapping to an earlier value.
+  type Generation is new Interfaces.Unsigned_64;
+  NO_GENERATION : constant Generation := 0;
 
-  type Request_Identity is record
+  type Identity is record
     connection_id : Connection_Identity := NO_CONNECTION_IDENTITY;
-    request_id    : Fasyn.Protocol.Request_Id_Type := 0;
-    generation    : Request_Generation := NO_GENERATION;
+    request_id    : Fasyn.Protocol.Request_Id := 0;
+    generation    : Fasyn.Request.Generation := NO_GENERATION;
   end record;
 
-  NULL_REQUEST_IDENTITY : constant Request_Identity :=
+  NULL_IDENTITY : constant Identity :=
     (connection_id => NO_CONNECTION_IDENTITY,
      request_id    => 0,
      generation    => NO_GENERATION);
@@ -35,14 +41,17 @@ package Fasyn.Request is
      Runtime_Shutdown,
      Connection_Failure);
 
-  type Request_Context is limited private;
+  --! Borrowed application-callback view created by Exchange or Execution.
+  --! Applications receive it by parameter and cannot construct a standalone view.
+  type Context (<>) is limited private;
 
-  function is_null (request : Request_Identity) return Boolean;
-  function identity (context : Request_Context) return Request_Identity;
+  function is_null (request : Identity) return Boolean;
+  function current_identity (context : Fasyn.Request.Context) return Identity;
   function cancellation_reason
-    (context : Request_Context) return Cancellation_Cause;
-  function cancellation_requested (context : Request_Context) return Boolean;
-  function request_role (context : Request_Context) return Fasyn.Protocol.Role;
+    (context : Fasyn.Request.Context) return Cancellation_Cause;
+  function cancellation_requested
+    (context : Fasyn.Request.Context) return Boolean;
+  function role (context : Fasyn.Request.Context) return Fasyn.Protocol.Role;
 
   type Write_Status is
     (Write_Complete,
@@ -63,32 +72,39 @@ package Fasyn.Request is
      Malformed_Params,
      Output_Failed);
 
+  --! Bounded FastCGI response writer. Exchange/runtime processing initializes
+  --! it; asynchronous application callbacks receive it as callback-scoped.
   type Writer
     (max_output_bytes : Positive)
   is limited private;
 
-  procedure write_stdout
-    (self   : in out Writer;
-     data   : in Fasyn.Protocol.Byte_Array;
-     status : out Write_Status);
+  --! Writes require an initialized, open Writer. They report
+  --! `Writer_Not_Ready`, `Writer_Closed`, or `Output_Limit_Exceeded` for those
+  --! states. Exceeding the limit leaves it failed; successful `finish` emits
+  --! terminal records and closes it.
+  function write_stdout
+    (self : in out Writer;
+     data : in Fasyn.Protocol.Byte_Array) return Write_Status;
 
-  procedure write_stderr
-    (self   : in out Writer;
-     data   : in Fasyn.Protocol.Byte_Array;
-     status : out Write_Status);
+  --! Uses the same Writer state and output-limit contract as `write_stdout`.
+  function write_stderr
+    (self : in out Writer;
+     data : in Fasyn.Protocol.Byte_Array) return Write_Status;
 
-  procedure finish
+  --! On success emits terminal stream records and `END_REQUEST`, then closes
+  --! the Writer. It uses the same failure-state contract as `write_stdout`.
+  function finish
     (self               : in out Writer;
-     application_status : in Interfaces.Unsigned_32;
-     status             : out Write_Status);
+     application_status : in Interfaces.Unsigned_32) return Write_Status;
 
   --! A deferred request is an opaque capability for exactly one FastCGI
   --! connection/request generation. It never exposes transport ownership.
   --! Finalizing or dropping the handle releases only the capability; it does
   --! not finish or cancel the request, whose normal runtime lifetime remains
-  --! authoritative.
-  type Deferred_Request is
-    limited new Ada.Finalization.Limited_Controlled with private;
+  --! authoritative. A queued writable waiter that owner-thread dispatch has
+  --! not yet taken is removed with the handle. A waiter already dispatching
+  --! must remain alive until that callback returns.
+  type Deferred_Handle is limited private;
 
   type Defer_Status is
     (Defer_Complete,
@@ -103,123 +119,189 @@ package Fasyn.Request is
      Deferred_Resource_Failed,
      Deferred_Closed);
 
+  type Deferred_Writable_Waiter is limited interface;
+  type Deferred_Writable_Waiter_Access is
+    access all Deferred_Writable_Waiter'Class;
+
+  --! Runs on the executor's owning Event Loop. An exception escaping this
+  --! callback is converted to the asynchronous runtime's callback-failure
+  --! status; the one-shot registration is consumed before callback entry.
+  procedure on_deferred_writable
+    (self    : in out Deferred_Writable_Waiter;
+     request : in Identity) is abstract;
+
+  type Deferred_Wait_Status is
+    (Deferred_Wait_Ready,
+     Deferred_Wait_Registered,
+     Deferred_Wait_Closed,
+     Deferred_Wait_Conflict,
+     Deferred_Wait_Not_Blocked);
+
+  type Deferred_Wait_Cancel_Status is
+    (Deferred_Wait_Cancelled,
+     Deferred_Wait_Not_Registered,
+     Deferred_Wait_Dispatching);
+
   --! Transfer terminal response ownership from the callback-scoped Writer to
-  --! `request`. Deferral is accepted only at the terminal input callback for
+  --! `handle`. Deferral is accepted only at the terminal input callback for
   --! the active role. On success, further application writes through `response`
   --! are rejected and the executor worker may return immediately.
-  procedure defer_response
-    (context  : in Request_Context;
+  function defer_response
+    (context  : in Fasyn.Request.Context;
      response : in out Writer;
-     request  : in out Deferred_Request;
-     status   : out Defer_Status);
+     handle   : in out Deferred_Handle) return Defer_Status;
 
-  --! Deferred writes are bounded. Deferred_Would_Block is transient and asks
-  --! the producer to retry after queued output drains.
+  --! Deferred writes are bounded. Deferred_Would_Block is transient; an
+  --! event-driven producer should register `wait_writable` rather than poll.
   --! Deferred_Output_Limit_Exceeded means the encoded operation cannot fit the
   --! configured request/connection limit even when otherwise empty.
   --! Deferred_Resource_Failed means the operation was not queued because its
   --! bounded staging allocation failed; the live handle may be retried.
   --! Deferred_Closed means the exact request generation is no longer writable.
-  procedure write_stdout
-    (self   : in out Deferred_Request;
-     data   : in Fasyn.Protocol.Byte_Array;
-     status : out Deferred_Write_Status);
+  function write_stdout
+    (self : in out Deferred_Handle;
+     data : in Fasyn.Protocol.Byte_Array) return Deferred_Write_Status;
 
-  procedure write_stderr
-    (self   : in out Deferred_Request;
-     data   : in Fasyn.Protocol.Byte_Array;
-     status : out Deferred_Write_Status);
+  --! Uses the same bounded deferred-write contract as deferred `write_stdout`.
+  function write_stderr
+    (self : in out Deferred_Handle;
+     data : in Fasyn.Protocol.Byte_Array) return Deferred_Write_Status;
 
-  procedure finish
-    (self               : in out Deferred_Request;
-     application_status : in Interfaces.Unsigned_32;
-     status             : out Deferred_Write_Status);
+  --! Queues terminal deferred output under the same bounded-write contract.
+  function finish
+    (self               : in out Deferred_Handle;
+     application_status : in Interfaces.Unsigned_32)
+     return Deferred_Write_Status;
 
-  function identity (request : Deferred_Request) return Request_Identity;
+  --! One-shot readiness registration for a deferred producer that observed
+  --! `Deferred_Would_Block`. The most recent blocked write supplies one wait
+  --! token; a later write attempt or wait consumes/supersedes it.
+  --! `Deferred_Wait_Not_Blocked` means no blocked-attempt token is pending. If
+  --! writable progress occurred after the blocked attempt,
+  --! `Deferred_Wait_Ready` means
+  --! retry immediately and no callback is retained.
+  --! `Deferred_Wait_Registered` retains `waiter` until one later
+  --! output/cancellation state change schedules exactly one callback on the
+  --! executor's owning Event Loop. Re-registering
+  --! the same waiter is idempotent; a different queued waiter reports
+  --! `Deferred_Wait_Conflict`. `Deferred_Wait_Closed` means the exact request
+  --! generation is no longer writable. A readiness callback is only a retry
+  --! hint, not a byte reservation: the retry may still block and then register
+  --! again. The waiter must outlive that callback or a successful cancellation.
+  function wait_writable
+    (self   : in out Deferred_Handle;
+     waiter : not null Deferred_Writable_Waiter_Access)
+     return Deferred_Wait_Status;
+
+  --! Cancels a queued one-shot readiness waiter.
+  --! `Deferred_Wait_Dispatching` means owner-thread dispatch has already taken
+  --! the callback; the waiter must remain alive until that callback returns.
+  function cancel_writable_wait
+    (self : in out Deferred_Handle) return Deferred_Wait_Cancel_Status;
+
+  function current_identity (handle : Deferred_Handle) return Identity;
   function cancellation_reason
-    (request : Deferred_Request) return Cancellation_Cause;
+    (handle : Deferred_Handle) return Cancellation_Cause;
   function cancellation_requested
-    (request : Deferred_Request) return Boolean;
+    (handle : Deferred_Handle) return Boolean;
 
+  --! Callback arguments are callback-scoped; application code must not retain
+  --! access to `context`, input arrays, or `response` after returning. One
+  --! connection serializes its own application callbacks, but distinct
+  --! connections may invoke the same Application instance concurrently on
+  --! executor workers. A shared instance must therefore synchronize any mutable
+  --! state that crosses connections; otherwise use a separate instance per
+  --! connection. Fasyn does not globally serialize Application callbacks.
   type Application is limited interface;
   type Application_Access is access all Application'Class;
 
   procedure on_parameter
     (self    : in out Application;
-     context : in Request_Context;
+     context : in Fasyn.Request.Context;
      name    : in Fasyn.Protocol.Byte_Array;
      value   : in Fasyn.Protocol.Byte_Array)
   is abstract;
 
   procedure on_params_end
     (self     : in out Application;
-     context  : in Request_Context;
+     context  : in Fasyn.Request.Context;
      response : in out Writer)
   is abstract;
 
+  --! `data` is an ordered stream chunk, not a FastCGI record boundary. The
+  --! runtime may coalesce adjacent input records/socket fragments within its
+  --! bounded scheduling policy.
   procedure on_stdin
     (self     : in out Application;
-     context  : in Request_Context;
+     context  : in Fasyn.Request.Context;
      data     : in Fasyn.Protocol.Byte_Array;
      response : in out Writer)
   is abstract;
 
   procedure on_stdin_end
     (self     : in out Application;
-     context  : in Request_Context;
+     context  : in Fasyn.Request.Context;
      response : in out Writer)
   is abstract;
 
+  --! `data` has the same implementation-defined bounded chunking contract as
+  --! `on_stdin`; record and socket fragmentation is not exposed as semantics.
   procedure on_data
     (self     : in out Application;
-     context  : in Request_Context;
+     context  : in Fasyn.Request.Context;
      data     : in Fasyn.Protocol.Byte_Array;
      response : in out Writer)
   is null;
 
   procedure on_data_end
     (self     : in out Application;
-     context  : in Request_Context;
+     context  : in Fasyn.Request.Context;
      response : in out Writer)
   is null;
 
+  --! Strict record state machine: `begin_record`, zero or more
+  --! `feed_content` calls totaling the declared content length, then
+  --! `end_record`. Fatal sequencing, content, parameter, or output errors leave
+  --! the Exchange failed and it must be abandoned.
   type Exchange
-    (max_name_bytes  : Positive;
-     max_value_bytes : Positive)
+    (max_name_bytes  : Natural;
+     max_value_bytes : Natural)
   is limited private;
 
-  procedure begin_record
+  --! Opens one record and enforces request ID, role, and stream sequencing.
+  function begin_record
     (self          : in out Exchange;
      record_header : in Fasyn.Protocol.Header;
      response      : in out Writer;
-     status        : out Input_Status;
      connection_id : in Connection_Identity := NO_CONNECTION_IDENTITY;
-     generation    : in Request_Generation := NO_GENERATION);
+     generation    : in Fasyn.Request.Generation := NO_GENERATION)
+     return Input_Status;
 
   --! If `feed_content` or `end_record` dispatches an application callback that
   --! raises an exception, the exception propagates to the caller. The caller
   --! must abandon the current `Exchange` and its `Writer`; direct exchange
   --! processing does not translate callback exceptions into cancellation.
-  procedure feed_content
-    (self     : in out Exchange;
-     data     : in Fasyn.Protocol.Byte_Array;
-     handler  : in out Application'Class;
-     response : in out Writer;
-     status   : out Input_Status);
+  function feed_content
+    (self        : in out Exchange;
+     data        : in Fasyn.Protocol.Byte_Array;
+     application : in out Fasyn.Request.Application'Class;
+     response    : in out Writer) return Input_Status;
 
-  procedure end_record
-    (self     : in out Exchange;
-     handler  : in out Application'Class;
-     response : in out Writer;
-     status   : out Input_Status);
+  --! Requires exactly the declared content to have been consumed, then
+  --! closes the current record and dispatches any end-of-stream callback.
+  function end_record
+    (self        : in out Exchange;
+     application : in out Fasyn.Request.Application'Class;
+     response    : in out Writer) return Input_Status;
 
-  procedure cancel
+  --! Cancels an active request with a non-`Not_Cancelled` cause and emits its
+  --! terminal response; inactive requests are reported as `Ignored_Inactive`.
+  function cancel
     (self     : in out Exchange;
      response : in out Writer;
-     cause    : in Cancellation_Cause;
-     status   : out Input_Status);
+     cause    : in Cancellation_Cause) return Input_Status;
 
-  function identity (self : Exchange) return Request_Identity;
+  function current_identity (self : Exchange) return Identity;
   function cancellation_reason (self : Exchange) return Cancellation_Cause;
   function keep_connection (self : Exchange) return Boolean;
   function is_complete (self : Exchange) return Boolean;
@@ -242,26 +324,38 @@ private
     (self : in out Deferred_Target; last : out Boolean) is abstract;
   procedure release_handle
     (self    : in out Deferred_Target;
-     request : in Request_Identity;
+     request : in Identity;
      last    : out Boolean) is abstract;
+  procedure deallocate
+    (self   : in out Deferred_Target;
+     target : in out Deferred_Target_Access) is abstract;
   procedure request_defer
     (self    : in out Deferred_Target;
-     request : in Request_Identity;
+     request : in Identity;
      result  : out Target_Defer_Result) is abstract;
   procedure submit_deferred
     (self               : in out Deferred_Target;
-     request            : in Request_Identity;
+     request            : in Identity;
      operation          : in Deferred_Command_Kind;
      data               : in Fasyn.Protocol.Byte_Array;
      application_status : in Interfaces.Unsigned_32;
      status             : out Deferred_Write_Status) is abstract;
   procedure cancel_deferred
     (self    : in out Deferred_Target;
-     request : in Request_Identity;
+     request : in Identity;
      cause   : in Cancellation_Cause) is abstract;
+  procedure wait_deferred_writable
+    (self    : in out Deferred_Target;
+     request : in Identity;
+     waiter  : not null Deferred_Writable_Waiter_Access;
+     status  : out Deferred_Wait_Status) is abstract;
+  procedure cancel_deferred_writable_wait
+    (self    : in out Deferred_Target;
+     request : in Identity;
+     status  : out Deferred_Wait_Cancel_Status) is abstract;
   function target_cancellation_reason
     (self    : Deferred_Target;
-     request : Request_Identity) return Cancellation_Cause is abstract;
+     request : Identity) return Cancellation_Cause is abstract;
 
   procedure release_target (target : in out Deferred_Target_Access);
 
@@ -269,64 +363,80 @@ private
     procedure signal (cause : in Cancellation_Cause);
     function reason return Cancellation_Cause;
   private
+    --  Exchange creates callback Contexts per dispatch.  Keep cancellation
+    --  synchronization atomic-only so Context construction needs no OS lock.
+    pragma Lock_Free;
     current_reason : Cancellation_Cause := Not_Cancelled;
   end Cancellation_State;
 
-  type Request_Context is limited record
-    request_value   : Request_Identity := NULL_REQUEST_IDENTITY;
+  type Context (callback_owned : Boolean) is limited record
+    request_value   : Identity := NULL_IDENTITY;
     role_value      : Fasyn.Protocol.Role := Fasyn.Protocol.Responder;
     cancellation    : Cancellation_State;
     deferred_target : Deferred_Target_Access := null;
     defer_allowed   : Boolean := False;
   end record;
 
-  type Request_Context_Access is access all Request_Context;
+  type Callback_Context_Access is access all Context;
 
-  procedure initialize_request_context
-    (context         : in out Request_Context;
-     request         : in Request_Identity;
-     request_role    : in Fasyn.Protocol.Role;
+  procedure initialize_callback_context
+    (context         : in out Fasyn.Request.Context;
+     request         : in Identity;
+     role            : in Fasyn.Protocol.Role;
      deferred_target : in Deferred_Target_Access := null;
      defer_allowed   : in Boolean := False);
 
   procedure signal_cancellation
-    (context : in out Request_Context;
+    (context : in out Fasyn.Request.Context;
      cause   : in Cancellation_Cause);
 
-  type Deferred_Request is
+  type Deferred_Handle is
     limited new Ada.Finalization.Limited_Controlled with record
     target        : Deferred_Target_Access := null;
-    request_value : Request_Identity := NULL_REQUEST_IDENTITY;
+    request_value : Identity := NULL_IDENTITY;
   end record;
 
-  overriding procedure Finalize (self : in out Deferred_Request);
+  overriding procedure Finalize (self : in out Deferred_Handle);
 
   type Writer
     (max_output_bytes : Positive)
   is limited record
     bytes       : Fasyn.Protocol.Byte_Array (1 .. max_output_bytes);
+    first       : Positive := 1;
     length      : Natural := 0;
     limit       : Natural := max_output_bytes;
-    request_id  : Fasyn.Protocol.Request_Id_Type := 0;
+    request_id  : Fasyn.Protocol.Request_Id := 0;
     initialized : Boolean := False;
     finished    : Boolean := False;
     deferred    : Boolean := False;
     failed      : Boolean := False;
   end record;
 
+  function buffered_byte
+    (self  : Writer;
+     index : Positive) return Fasyn.Protocol.Byte;
+
+  procedure append_buffered_byte
+    (self  : in out Writer;
+     value : Fasyn.Protocol.Byte);
+
+  procedure consume_buffered
+    (self  : in out Writer;
+     count : Natural);
+
   type Exchange
-    (max_name_bytes  : Positive;
-     max_value_bytes : Positive)
+    (max_name_bytes  : Natural;
+     max_value_bytes : Natural)
   is limited record
     params_decoder : Fasyn.Protocol.Name_Values.Decoder
       (max_name_bytes  => max_name_bytes,
        max_value_bytes => max_value_bytes);
     begin_body : Fasyn.Protocol.Byte_Array
-      (0 .. Fasyn.Protocol.Messages.BEGIN_REQUEST_BODY_LENGTH - 1) :=
+      (0 .. Fasyn.Protocol.Bodies.BEGIN_REQUEST_BODY_LENGTH - 1) :=
         [others => 0];
     connection_id          : Connection_Identity := NO_CONNECTION_IDENTITY;
-    request_id             : Fasyn.Protocol.Request_Id_Type := 0;
-    generation             : Request_Generation := NO_GENERATION;
+    request_id             : Fasyn.Protocol.Request_Id := 0;
+    generation             : Fasyn.Request.Generation := NO_GENERATION;
     role_value             : Fasyn.Protocol.Role := Fasyn.Protocol.Responder;
     current_record_type    : Fasyn.Protocol.Byte := 0;
     current_content_length : Natural := 0;

@@ -3,6 +3,7 @@
  * Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
  */
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stddef.h>
@@ -17,6 +18,40 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+long
+fasyn_test_open_fd_count (void)
+{
+  const char *paths[] = { "/proc/self/fd", "/dev/fd" };
+  DIR *directory = NULL;
+  struct dirent *entry;
+  int directory_fd;
+  long count = 0;
+  size_t path_index;
+
+  for (path_index = 0; path_index < sizeof paths / sizeof paths[0]; ++path_index)
+    {
+      directory = opendir (paths[path_index]);
+      if (directory != NULL)
+        break;
+    }
+
+  if (directory == NULL)
+    return -1;
+
+  directory_fd = dirfd (directory);
+  while ((entry = readdir (directory)) != NULL)
+    {
+      char *end = NULL;
+      long fd = strtol (entry->d_name, &end, 10);
+      if (end != entry->d_name && *end == '\0' && fd >= 0 &&
+          fd != directory_fd)
+        count += 1;
+    }
+
+  closedir (directory);
+  return count;
+}
 
 static int
 set_nonblocking (int fd)
@@ -167,6 +202,79 @@ cleanup:
   unlink (path);
   if (client != -1)
     close (client);
+  if (listener != -1)
+    close (listener);
+  return error;
+}
+
+
+int
+fasyn_test_listener_storm (int *listener_fd, int *client_fds, size_t count)
+{
+  struct sockaddr_un address;
+  char path[] = "/tmp/fasyn-listener-storm-XXXXXX";
+  int path_fd = -1;
+  int listener = -1;
+  int error = 0;
+  size_t index;
+
+  if (listener_fd == NULL || client_fds == NULL || count == 0 || count > 128)
+    return EINVAL;
+
+  *listener_fd = -1;
+  for (index = 0; index < count; ++index)
+    client_fds[index] = -1;
+
+  path_fd = mkstemp (path);
+  if (path_fd == -1)
+    return errno;
+  close (path_fd);
+  unlink (path);
+
+  listener = socket (AF_UNIX, SOCK_STREAM, 0);
+  if (listener == -1)
+    {
+      error = errno;
+      goto cleanup;
+    }
+
+  memset (&address, 0, sizeof address);
+  address.sun_family = AF_UNIX;
+  if (snprintf (address.sun_path, sizeof address.sun_path, "%s", path) >=
+      (int) sizeof address.sun_path)
+    {
+      error = ENAMETOOLONG;
+      goto cleanup;
+    }
+
+  if (bind (listener, (struct sockaddr *) &address, sizeof address) == -1 ||
+      listen (listener, (int) count) == -1)
+    {
+      error = errno;
+      goto cleanup;
+    }
+
+  for (index = 0; index < count; ++index)
+    {
+      client_fds[index] = socket (AF_UNIX, SOCK_STREAM, 0);
+      if (client_fds[index] == -1 ||
+          connect (client_fds[index], (struct sockaddr *) &address,
+                   sizeof address) == -1)
+        {
+          error = errno;
+          goto cleanup;
+        }
+    }
+
+  unlink (path);
+  *listener_fd = listener;
+  return 0;
+
+cleanup:
+  unlink (path);
+  for (index = 0; index < count; ++index)
+    if (client_fds[index] != -1)
+      close (client_fds[index]);
   if (listener != -1)
     close (listener);
   return error;

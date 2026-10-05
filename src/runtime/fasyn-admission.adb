@@ -1,14 +1,14 @@
 -- ============================================================================
--- fasyn-request-admission.adb
+-- fasyn-admission.adb
 -- Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
 -- ============================================================================
-package body Fasyn.Request.Admission is
+package body Fasyn.Admission is
 
   protected body Counters is
 
     procedure try_connection (accepted : out Boolean) is
     begin
-      if connections < connection_limit then
+      if connections < max_connections then
         connections := connections + 1;
         accepted := True;
       else
@@ -16,16 +16,19 @@ package body Fasyn.Request.Admission is
       end if;
     end try_connection;
 
-    procedure release_connection is
+    procedure release_connection (released : out Boolean) is
     begin
-      if connections > 0 then
+      if connections = 0 then
+        released := False;
+      else
         connections := connections - 1;
+        released := True;
       end if;
     end release_connection;
 
     procedure try_request (accepted : out Boolean) is
     begin
-      if requests < request_limit then
+      if requests < max_requests then
         requests := requests + 1;
         accepted := True;
       else
@@ -33,10 +36,13 @@ package body Fasyn.Request.Admission is
       end if;
     end try_request;
 
-    procedure release_request is
+    procedure release_request (released : out Boolean) is
     begin
-      if requests > 0 then
+      if requests = 0 then
+        released := False;
+      else
         requests := requests - 1;
+        released := True;
       end if;
     end release_request;
 
@@ -52,40 +58,46 @@ package body Fasyn.Request.Admission is
 
   end Counters;
 
-  procedure try_acquire_connection
-    (self     : in out Context;
-     accepted : out Boolean)
-  is
+  function try_acquire_connection (self : in out Context) return Boolean is
+    accepted : Boolean;
   begin
     self.state.try_connection (accepted);
+    return accepted;
   end try_acquire_connection;
 
   procedure release_connection (self : in out Context) is
+    released : Boolean;
   begin
-    self.state.release_connection;
+    self.state.release_connection (released);
+    if not released then
+      raise Program_Error with "connection admission release underflow";
+    end if;
   end release_connection;
 
-  procedure try_acquire_request
-    (self     : in out Context;
-     accepted : out Boolean)
-  is
+  function try_acquire_request (self : in out Context) return Boolean is
+    accepted : Boolean;
   begin
     self.state.try_request (accepted);
+    return accepted;
   end try_acquire_request;
 
   procedure release_request (self : in out Context) is
+    released : Boolean;
   begin
-    self.state.release_request;
+    self.state.release_request (released);
+    if not released then
+      raise Program_Error with "request admission release underflow";
+    end if;
   end release_request;
 
-  function max_connections (self : Context) return Positive is
+  function max_connections (self : Context) return Natural is
   begin
-    return self.connection_limit;
+    return self.max_connections;
   end max_connections;
 
-  function max_requests (self : Context) return Positive is
+  function max_requests (self : Context) return Natural is
   begin
-    return self.request_limit;
+    return self.max_requests;
   end max_requests;
 
   function active_connections (self : Context) return Natural is
@@ -98,4 +110,4 @@ package body Fasyn.Request.Admission is
     return self.state.request_count;
   end active_requests;
 
-end Fasyn.Request.Admission;
+end Fasyn.Admission;

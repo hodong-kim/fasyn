@@ -11,10 +11,11 @@ with Clair.Status;
 with Clair.Test.Assertions;
 with Fasyn.Protocol;
 with Fasyn.Protocol.Codec;
-with Fasyn.Protocol.Messages;
+with Fasyn.Protocol.Bodies;
 with Fasyn.Protocol.Name_Values;
+with Fasyn.Protocol.Management;
 with Fasyn.Request;
-with Fasyn.Request.Admission;
+with Fasyn.Admission;
 with Fasyn.Request.Connection;
 with Fasyn.Request.Execution;
 
@@ -23,10 +24,11 @@ package body Tests.Management is
   package A renames Clair.Test.Assertions;
   package P renames Fasyn.Protocol;
   package C renames Fasyn.Protocol.Codec;
-  package M renames Fasyn.Protocol.Messages;
+  package B renames Fasyn.Protocol.Bodies;
   package N renames Fasyn.Protocol.Name_Values;
+  package PM renames Fasyn.Protocol.Management;
   package R renames Fasyn.Request;
-  package RA renames Fasyn.Request.Admission;
+  package RA renames Fasyn.Admission;
   package RC renames Fasyn.Request.Connection;
   package E renames Fasyn.Request.Execution;
 
@@ -34,12 +36,52 @@ package body Tests.Management is
   use type Clair.IO.Byte_Count;
   use type Clair.Status.Code;
   use type C.Decode_Status;
-  use type M.Body_Status;
+  use type B.Body_Status;
   use type N.Encode_Status;
   use type N.Feed_Status;
   use type P.Byte;
-  use type P.Request_Id_Type;
+  use type P.Request_Id;
+  use type RC.Initialization_Outcome;
   use type System.Storage_Elements.Storage_Offset;
+
+  procedure noncanonical_query_lengths
+    (reporter : in out Clair.Test.Reporter.Context)
+  is
+    query : PM.Query;
+  begin
+    PM.feed (query, 16#80#);
+    PM.feed (query, 0);
+    PM.feed (query, 0);
+    PM.feed (query, 1);
+    A.assert_false
+      (reporter, PM.at_pair_boundary(query),
+       "GET_VALUES rejects four-byte name length below 128");
+
+    PM.reset (query);
+    PM.feed (query, 0);
+    PM.feed (query, 16#80#);
+    PM.feed (query, 0);
+    PM.feed (query, 0);
+    PM.feed (query, 1);
+    A.assert_false
+      (reporter, PM.at_pair_boundary(query),
+       "GET_VALUES rejects four-byte value length below 128");
+
+    PM.reset (query);
+    PM.feed (query, 16#80#);
+    PM.feed (query, 0);
+    PM.feed (query, 0);
+    A.assert_false
+      (reporter, PM.at_pair_boundary(query),
+       "truncated four-byte GET_VALUES length remains incomplete");
+
+    PM.reset (query);
+    PM.feed (query, 0);
+    PM.feed (query, 0);
+    A.assert_true
+      (reporter, PM.at_pair_boundary(query),
+       "canonical empty GET_VALUES pair remains accepted");
+  end noncanonical_query_lengths;
 
   function c_socketpair
     (runtime_fd : access Interfaces.C.int;
@@ -54,29 +96,29 @@ package body Tests.Management is
 
   overriding procedure on_parameter
     (self    : in out Null_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array);
 
   overriding procedure on_params_end
     (self     : in out Null_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_stdin
     (self     : in out Null_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer);
 
   overriding procedure on_stdin_end
     (self     : in out Null_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_parameter
     (self    : in out Null_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array)
   is
@@ -87,7 +129,7 @@ package body Tests.Management is
 
   overriding procedure on_params_end
     (self     : in out Null_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (context, response);
@@ -97,7 +139,7 @@ package body Tests.Management is
 
   overriding procedure on_stdin
     (self     : in out Null_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer)
   is
@@ -108,7 +150,7 @@ package body Tests.Management is
 
   overriding procedure on_stdin_end
     (self     : in out Null_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (context, response);
@@ -138,8 +180,8 @@ package body Tests.Management is
     written : Natural;
     status  : N.Encode_Status;
   begin
-    N.encode_pair
-      (name_bytes, empty, encoded, written, status);
+    status := N.encode_pair
+      (name_bytes, empty, encoded, written);
 
     if status /= N.Encode_Complete or else
        position + written - 1 > buffer'last
@@ -157,16 +199,15 @@ package body Tests.Management is
     (buffer      : in out P.Byte_Array;
      position    : in out Positive;
      record_type : P.Byte;
-     request_id  : P.Request_Id_Type;
+     request_id  : P.Request_Id;
      content     : P.Byte_Array)
   is
     header : constant P.Header :=
       (version        => P.VERSION_1,
        record_type    => record_type,
        request_id     => request_id,
-       content_length => P.Content_Length_Type(content'length),
-       padding_length => 0,
-       reserved       => 0);
+       content_length => P.Content_Length(content'length),
+       padding_length => 0);
     bytes : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
   begin
     C.encode_header (header, bytes);
@@ -192,16 +233,16 @@ package body Tests.Management is
   begin
     while position <= data'last loop
       status := Clair.IO.write
-        (fd     => fd,
-         buf    => data(position)'address,
-         count  => Interfaces.C.size_t(data'last - position + 1),
-         result => written);
+        (fd            => fd,
+         buffer        => data(position)'address,
+         count         => Clair.IO.Byte_Count(data'last - position + 1),
+         bytes_written => written);
 
       if status /= Clair.Status.OK then
         return status;
       end if;
 
-      if written <= 0 then
+      if written = 0 then
         return Clair.Status.END_OF_STREAM;
       end if;
 
@@ -302,34 +343,79 @@ package body Tests.Management is
     (reporter : in out Clair.Test.Reporter.Context)
   is
     admission : RA.Context
-      (connection_limit => 1,
-       request_limit    => 2);
+      (max_connections => 1,
+       max_requests    => 2);
     accepted : Boolean;
+    underflow_rejected : Boolean := False;
   begin
-    RA.try_acquire_connection (admission, accepted);
+    accepted := RA.try_acquire_connection (admission);
     A.assert_true (reporter, accepted, "first connection is admitted");
-    RA.try_acquire_connection (admission, accepted);
+    accepted := RA.try_acquire_connection (admission);
     A.assert_false (reporter, accepted, "connection capacity is bounded");
     A.assert_equal_natural
       (reporter, RA.active_connections(admission), 1,
        "connection accounting reports one active connection");
 
-    RA.try_acquire_request (admission, accepted);
+    accepted := RA.try_acquire_request (admission);
     A.assert_true (reporter, accepted, "first request is admitted");
-    RA.try_acquire_request (admission, accepted);
+    accepted := RA.try_acquire_request (admission);
     A.assert_true (reporter, accepted, "second request is admitted");
-    RA.try_acquire_request (admission, accepted);
+    accepted := RA.try_acquire_request (admission);
     A.assert_false (reporter, accepted, "global request capacity is bounded");
 
     RA.release_request (admission);
     RA.release_request (admission);
+    begin
+      RA.release_request (admission);
+    exception
+      when Program_Error =>
+        underflow_rejected := True;
+    end;
+    A.assert_true
+      (reporter, underflow_rejected,
+       "unmatched request release is rejected");
+
     RA.release_connection (admission);
+    underflow_rejected := False;
+    begin
+      RA.release_connection (admission);
+    exception
+      when Program_Error =>
+        underflow_rejected := True;
+    end;
+    A.assert_true
+      (reporter, underflow_rejected,
+       "unmatched connection release is rejected");
     A.assert_equal_natural
       (reporter, RA.active_requests(admission), 0,
        "request accounting returns to zero");
     A.assert_equal_natural
       (reporter, RA.active_connections(admission), 0,
        "connection accounting returns to zero");
+
+    declare
+      no_connections : RA.Context
+        (max_connections => 0, max_requests => 1);
+      no_requests : RA.Context
+        (max_connections => 1, max_requests => 0);
+    begin
+      A.assert_false
+        (reporter, RA.try_acquire_connection(no_connections),
+         "zero connection quota refuses every acquisition");
+      A.assert_true
+        (reporter, RA.try_acquire_connection(no_requests),
+         "zero request quota still permits a connection");
+      A.assert_false
+        (reporter, RA.try_acquire_request(no_requests),
+         "zero request quota refuses every application request");
+      A.assert_equal_natural
+        (reporter, RA.max_connections(no_connections), 0,
+         "zero connection quota remains observable");
+      A.assert_equal_natural
+        (reporter, RA.max_requests(no_requests), 0,
+         "zero request quota remains observable");
+      RA.release_connection (no_requests);
+    end;
   end admission_accounting;
 
   procedure management_records
@@ -339,14 +425,14 @@ package body Tests.Management is
     executor    : aliased E.Context;
     application : aliased Null_Application;
     admission   : aliased RA.Context
-      (connection_limit => 7,
-       request_limit    => 11);
+      (max_connections => 7,
+       max_requests    => 11);
     connection  : aliased RC.Context
       (max_requests_per_connection => 4,
-       max_name_bytes              => 64,
-       max_value_bytes             => 64,
+       max_name_bytes              => 0,
+       max_value_bytes             => 0,
        max_request_output_bytes    => 1024,
-       max_output_bytes            => 1024,
+       max_connection_output_bytes => 1024,
        read_buffer_bytes           => 256,
        write_chunk_bytes           => 256);
     runtime_raw  : aliased Interfaces.C.int := -1;
@@ -355,10 +441,12 @@ package body Tests.Management is
     peer_fd      : Clair.IO.Descriptor;
     native_error : Interfaces.C.int;
     status       : Clair.Status.Code;
+    outcome      : RC.Initialization_Outcome;
     dispatched   : Boolean;
-    query_body   : P.Byte_Array (1 .. 128);
+    query_body   : P.Byte_Array (1 .. 256);
     query_pos    : Positive := query_body'first;
-    input        : P.Byte_Array (1 .. 256);
+    long_unknown : constant String (1 .. 130) := (others => 'X');
+    input        : P.Byte_Array (1 .. 512);
     input_pos    : Positive := input'first;
     output       : P.Byte_Array (1 .. 512);
     output_len   : Natural := 0;
@@ -369,13 +457,15 @@ package body Tests.Management is
     saw_max_conns : Boolean := False;
     saw_max_reqs  : Boolean := False;
     saw_mpxs      : Boolean := False;
-    unknown_body  : M.Unknown_Type_Body;
-    body_status   : M.Body_Status;
+    unknown_body  : B.Unknown_Type_Body;
+    body_status   : B.Body_Status;
+    empty_query_burst_count : constant Positive := 40;
+    unknown_burst_count     : constant Positive := 20;
   begin
     append_pair (query_body, query_pos, "FCGI_MAX_CONNS");
+    append_pair (query_body, query_pos, long_unknown);
     append_pair (query_body, query_pos, "FCGI_MAX_REQS");
     append_pair (query_body, query_pos, "FCGI_MPXS_CONNS");
-    append_pair (query_body, query_pos, "FCGI_NOT_A_VALUE");
 
     native_error := c_socketpair (runtime_raw'access, peer_raw'access);
     A.assert_equal_integer
@@ -409,17 +499,17 @@ package body Tests.Management is
        runtime_fd,
        application'Unchecked_Access,
        executor'Unchecked_Access,
-       request_timeout => 60_000,
-       connection_id   => 20,
-       admission       => admission'Unchecked_Access);
+       request_lifetime_timeout => 60_000,
+       admission       => admission'Unchecked_Access,
+       outcome          => outcome);
     A.assert_true
-      (reporter, status = Clair.Status.OK,
-       "management connection initializes");
+      (reporter, status = Clair.Status.OK and then outcome = RC.Activated,
+       "management connection initializes with admission");
 
     append_record
       (input,
        input_pos,
-       P.GET_VALUES_TYPE,
+       P.GET_VALUES,
        0,
        query_body(query_body'first .. query_pos - 1));
 
@@ -444,10 +534,9 @@ package body Tests.Management is
        "GET_VALUES_RESULT bytes are produced");
 
     if output_len >= P.HEADER_LENGTH then
-      C.decode_header
+      decode_status := C.decode_header
         (output(output'first .. output'first + P.HEADER_LENGTH - 1),
-         header,
-         decode_status);
+         header);
     else
       decode_status := C.Need_More_Data;
     end if;
@@ -455,7 +544,7 @@ package body Tests.Management is
     A.assert_true
       (reporter,
        decode_status = C.Complete and then
-       header.record_type = P.GET_VALUES_RESULT_TYPE and then
+       header.record_type = P.GET_VALUES_RESULT and then
        header.request_id = 0,
        "GET_VALUES_RESULT uses management request id zero");
 
@@ -465,10 +554,8 @@ package body Tests.Management is
        P.HEADER_LENGTH + Natural(header.content_length) <= output_len
     then
       for offset in 0 .. Natural(header.content_length) - 1 loop
-        N.feed
-          (decoder,
-           output(output'first + P.HEADER_LENGTH + offset),
-           feed_status);
+        feed_status := N.feed
+          (decoder, output(output'first + P.HEADER_LENGTH + offset));
         if feed_status = N.Pair_Complete then
           if pair_matches(decoder, "FCGI_MAX_CONNS", "7") then
             saw_max_conns := True;
@@ -484,7 +571,10 @@ package body Tests.Management is
 
     A.assert_true
       (reporter, saw_max_conns and then saw_max_reqs and then saw_mpxs,
-       "advertised management values match effective admission policy");
+       "long unknown GET_VALUES name is skipped between recognized names");
+    A.assert_true
+      (reporter, RC.is_active(connection),
+       "long unknown GET_VALUES name preserves the connection");
     A.assert_equal_natural
       (reporter, application.callback_count, 0,
        "management records never reach application callbacks");
@@ -494,29 +584,74 @@ package body Tests.Management is
     declare
       empty : P.Byte_Array (1 .. 0);
     begin
-      append_record (input, input_pos, 99, 0, empty);
+      for index in 1 .. empty_query_burst_count loop
+        pragma Unreferenced (index);
+        append_record (input, input_pos, P.GET_VALUES, 0, empty);
+      end loop;
     end;
 
     status := write_all (peer_fd, input(input'first .. input_pos - 1));
     A.assert_true
       (reporter, status = Clair.Status.OK,
-       "unknown management record is written");
+       "empty GET_VALUES burst is written");
 
-    for attempt in 1 .. 50 loop
+    for attempt in 1 .. 150 loop
       pragma Unreferenced (attempt);
       status := Clair.Event_Loop.iterate (event_loop, 10, dispatched);
       exit when status /= Clair.Status.OK;
       read_peer (peer_fd, output, output_len);
       exit when
-        output_len >= P.HEADER_LENGTH + M.UNKNOWN_TYPE_BODY_LENGTH and then
+        output_len = empty_query_burst_count * P.HEADER_LENGTH and then
         RC.pending_output_bytes(connection) = 0;
     end loop;
 
+    A.assert_equal_natural
+      (reporter, output_len, empty_query_burst_count * P.HEADER_LENGTH,
+       "GET_VALUES backpressure preserves every empty result");
+    A.assert_true
+      (reporter, RC.is_active(connection),
+       "GET_VALUES control burst preserves the FastCGI connection");
+
+    input_pos := input'first;
+    output_len := 0;
+    declare
+      empty : P.Byte_Array (1 .. 0);
+    begin
+      for index in 1 .. unknown_burst_count loop
+        pragma Unreferenced (index);
+        append_record (input, input_pos, 99, 0, empty);
+      end loop;
+    end;
+
+    status := write_all (peer_fd, input(input'first .. input_pos - 1));
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "unknown management burst is written");
+
+    for attempt in 1 .. 100 loop
+      pragma Unreferenced (attempt);
+      status := Clair.Event_Loop.iterate (event_loop, 10, dispatched);
+      exit when status /= Clair.Status.OK;
+      read_peer (peer_fd, output, output_len);
+      exit when
+        output_len = unknown_burst_count *
+          (P.HEADER_LENGTH + B.UNKNOWN_TYPE_BODY_LENGTH) and then
+        RC.pending_output_bytes(connection) = 0;
+    end loop;
+
+    A.assert_equal_natural
+      (reporter, output_len,
+       unknown_burst_count *
+         (P.HEADER_LENGTH + B.UNKNOWN_TYPE_BODY_LENGTH),
+       "control backpressure preserves every UNKNOWN_TYPE response");
+    A.assert_true
+      (reporter, RC.is_active(connection),
+       "control-output burst preserves the FastCGI connection");
+
     if output_len >= P.HEADER_LENGTH then
-      C.decode_header
+      decode_status := C.decode_header
         (output(output'first .. output'first + P.HEADER_LENGTH - 1),
-         header,
-         decode_status);
+         header);
     else
       decode_status := C.Need_More_Data;
     end if;
@@ -524,24 +659,23 @@ package body Tests.Management is
     A.assert_true
       (reporter,
        decode_status = C.Complete and then
-       header.record_type = P.UNKNOWN_TYPE_TYPE and then
+       header.record_type = P.UNKNOWN_TYPE and then
        header.request_id = 0,
        "unknown management type produces FCGI_UNKNOWN_TYPE");
 
-    if output_len >= P.HEADER_LENGTH + M.UNKNOWN_TYPE_BODY_LENGTH then
-      M.decode_unknown_type
+    if output_len >= P.HEADER_LENGTH + B.UNKNOWN_TYPE_BODY_LENGTH then
+      body_status := B.decode_unknown_type
         (output
            (output'first + P.HEADER_LENGTH ..
-            output'first + P.HEADER_LENGTH + M.UNKNOWN_TYPE_BODY_LENGTH - 1),
-         unknown_body,
-         body_status);
+            output'first + P.HEADER_LENGTH + B.UNKNOWN_TYPE_BODY_LENGTH - 1),
+         unknown_body);
     else
-      body_status := M.Invalid_Body_Length;
+      body_status := B.Invalid_Body_Length;
     end if;
 
     A.assert_true
       (reporter,
-       body_status = M.Body_Complete and then unknown_body.record_type = 99,
+       body_status = B.Body_Complete and then unknown_body.record_type = 99,
        "UNKNOWN_TYPE body identifies the rejected type");
 
     status := RC.finalize (connection);
@@ -569,6 +703,258 @@ package body Tests.Management is
        "connection finalization releases shared admission");
   end management_records;
 
+  procedure zero_request_quota_connection
+    (reporter : in out Clair.Test.Reporter.Context)
+  is
+    event_loop  : aliased Clair.Event_Loop.Context;
+    executor    : aliased E.Context;
+    application : aliased Null_Application;
+    admission   : aliased RA.Context
+      (max_connections => 1,
+       max_requests    => 0);
+    connection  : aliased RC.Context
+      (max_requests_per_connection => 2,
+       max_name_bytes              => 64,
+       max_value_bytes             => 64,
+       max_request_output_bytes    => 256,
+       max_connection_output_bytes => 512,
+       read_buffer_bytes           => 128,
+       write_chunk_bytes           => 128);
+    runtime_raw   : aliased Interfaces.C.int := -1;
+    peer_raw      : aliased Interfaces.C.int := -1;
+    runtime_fd    : Clair.IO.Descriptor;
+    peer_fd       : Clair.IO.Descriptor;
+    native_error  : Interfaces.C.int;
+    status        : Clair.Status.Code;
+    outcome       : RC.Initialization_Outcome;
+    dispatched    : Boolean;
+    query_body    : P.Byte_Array (1 .. 96);
+    query_pos     : Positive := query_body'first;
+    input         : P.Byte_Array (1 .. 192);
+    input_pos     : Positive := input'first;
+    output        : P.Byte_Array (1 .. 256);
+    output_len    : Natural := 0;
+    header        : P.Header;
+    decode_status : C.Decode_Status;
+    decoder       : N.Decoder (max_name_bytes => 32, max_value_bytes => 8);
+    feed_status   : N.Feed_Status;
+    saw_max_reqs  : Boolean := False;
+    saw_mpxs      : Boolean := False;
+    begin_body    : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE, flags => P.KEEP_CONN);
+    begin_bytes   : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_written : Natural;
+    body_status   : B.Body_Status;
+    end_body      : B.End_Request_Body;
+  begin
+    append_pair (query_body, query_pos, "FCGI_MAX_REQS");
+    append_pair (query_body, query_pos, "FCGI_MPXS_CONNS");
+    body_status := B.encode_begin_request
+      (begin_body, begin_bytes, begin_written);
+    A.assert_true
+      (reporter,
+       body_status = B.Body_Complete and then
+       begin_written = B.BEGIN_REQUEST_BODY_LENGTH,
+       "zero-request BEGIN_REQUEST body encodes");
+
+    native_error := c_socketpair (runtime_raw'access, peer_raw'access);
+    A.assert_equal_integer
+      (reporter, Integer(native_error), 0,
+       "zero-request socketpair is created");
+    if native_error /= 0 then
+      return;
+    end if;
+    runtime_fd := Clair.IO.Descriptor(runtime_raw);
+    peer_fd := Clair.IO.Descriptor(peer_raw);
+    A.assert_positive
+      (reporter, Integer(drain_peer(peer_fd)),
+       "zero-request socket fixture prefill is discarded");
+
+    status := Clair.Event_Loop.initialize (event_loop);
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request event loop initializes");
+    status := E.initialize
+      (executor, event_loop'Unchecked_Access, 1, 1, 128, 256);
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request executor initializes");
+
+    status := RC.initialize
+      (connection, event_loop'Unchecked_Access, runtime_fd,
+       application'Unchecked_Access, executor'Unchecked_Access, 60_000,
+       admission => admission'Unchecked_Access, outcome => outcome);
+    A.assert_true
+      (reporter,
+       status = Clair.Status.OK and then outcome = RC.Activated,
+       "zero-request connection is admitted");
+
+    append_record
+      (input, input_pos, P.GET_VALUES, 0,
+       query_body(query_body'first .. query_pos - 1));
+    status := write_all (peer_fd, input(input'first .. input_pos - 1));
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request GET_VALUES query is written");
+
+    for attempt in 1 .. 50 loop
+      pragma Unreferenced (attempt);
+      status := Clair.Event_Loop.iterate (event_loop, 10, dispatched);
+      exit when status /= Clair.Status.OK;
+      read_peer (peer_fd, output, output_len);
+      exit when output_len > 0 and then RC.pending_output_bytes(connection) = 0;
+    end loop;
+
+    if output_len >= P.HEADER_LENGTH then
+      decode_status := C.decode_header
+        (output(output'first .. output'first + P.HEADER_LENGTH - 1),
+         header);
+    else
+      decode_status := C.Need_More_Data;
+    end if;
+    A.assert_true
+      (reporter,
+       status = Clair.Status.OK and then
+       decode_status = C.Complete and then
+       header.record_type = P.GET_VALUES_RESULT,
+       "zero-request management query returns GET_VALUES_RESULT");
+
+    N.reset (decoder);
+    if decode_status = C.Complete and then
+       Natural(header.content_length) > 0 and then
+       P.HEADER_LENGTH + Natural(header.content_length) <= output_len
+    then
+      for offset in 0 .. Natural(header.content_length) - 1 loop
+        feed_status := N.feed
+          (decoder, output(output'first + P.HEADER_LENGTH + offset));
+        if feed_status = N.Pair_Complete then
+          if pair_matches(decoder, "FCGI_MAX_REQS", "0") then
+            saw_max_reqs := True;
+          elsif pair_matches(decoder, "FCGI_MPXS_CONNS", "0") then
+            saw_mpxs := True;
+          end if;
+          N.reset (decoder);
+        end if;
+      end loop;
+    end if;
+    A.assert_true
+      (reporter, saw_max_reqs and then saw_mpxs,
+       "zero request quota is advertised without multiplexing");
+
+    input_pos := input'first;
+    output_len := 0;
+    append_record (input, input_pos, P.BEGIN_REQUEST, 1, begin_bytes);
+    status := write_all (peer_fd, input(input'first .. input_pos - 1));
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request BEGIN_REQUEST is written");
+
+    for attempt in 1 .. 50 loop
+      pragma Unreferenced (attempt);
+      status := Clair.Event_Loop.iterate (event_loop, 10, dispatched);
+      exit when status /= Clair.Status.OK;
+      read_peer (peer_fd, output, output_len);
+      exit when
+        output_len >= P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH and then
+        RC.pending_output_bytes(connection) = 0;
+    end loop;
+
+    if output_len >= P.HEADER_LENGTH then
+      decode_status := C.decode_header
+        (output(output'first .. output'first + P.HEADER_LENGTH - 1),
+         header);
+    else
+      decode_status := C.Need_More_Data;
+    end if;
+    if decode_status = C.Complete and then
+       output_len >= P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH
+    then
+      body_status := B.decode_end_request
+        (output
+           (output'first + P.HEADER_LENGTH ..
+            output'first + P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH - 1),
+         end_body);
+    else
+      body_status := B.Invalid_Body_Length;
+    end if;
+    A.assert_true
+      (reporter,
+       status = Clair.Status.OK and then
+       decode_status = C.Complete and then
+       header.record_type = P.END_REQUEST and then
+       header.request_id = 1 and then
+       body_status = B.Body_Complete and then
+       end_body.protocol_status_code = P.OVERLOADED,
+       "zero request quota maps BEGIN_REQUEST to FCGI_OVERLOADED");
+    A.assert_equal_natural
+      (reporter, application.callback_count, 0,
+       "zero request quota never invokes the application");
+    A.assert_equal_natural
+      (reporter, RC.active_requests(connection), 0,
+       "zero request quota admits no connection request slot");
+    A.assert_equal_natural
+      (reporter, RA.active_requests(admission), 0,
+       "zero request quota retains no shared request admission");
+    A.assert_true
+      (reporter, RC.is_active(connection),
+       "overload refusal preserves the connection");
+
+    input_pos := input'first;
+    output_len := 0;
+    declare
+      empty : P.Byte_Array (1 .. 0);
+    begin
+      append_record (input, input_pos, P.GET_VALUES, 0, empty);
+    end;
+    status := write_all (peer_fd, input(input'first .. input_pos - 1));
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "post-overload management query is written");
+
+    for attempt in 1 .. 50 loop
+      pragma Unreferenced (attempt);
+      status := Clair.Event_Loop.iterate (event_loop, 10, dispatched);
+      exit when status /= Clair.Status.OK;
+      read_peer (peer_fd, output, output_len);
+      exit when output_len >= P.HEADER_LENGTH;
+    end loop;
+    if output_len >= P.HEADER_LENGTH then
+      decode_status := C.decode_header
+        (output(output'first .. output'first + P.HEADER_LENGTH - 1),
+         header);
+    else
+      decode_status := C.Need_More_Data;
+    end if;
+    A.assert_true
+      (reporter,
+       status = Clair.Status.OK and then
+       decode_status = C.Complete and then
+       header.record_type = P.GET_VALUES_RESULT and then
+       RC.is_active(connection),
+       "management traffic remains usable after overload refusal");
+
+    status := RC.finalize (connection);
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request connection finalizes");
+    status := E.begin_shutdown (executor);
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request executor begins shutdown");
+    status := E.finalize (executor);
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request executor finalizes");
+    status := Clair.IO.close (peer_fd);
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request peer closes");
+    status := Clair.Event_Loop.finalize (event_loop);
+    A.assert_true
+      (reporter, status = Clair.Status.OK,
+       "zero-request event loop finalizes");
+  end zero_request_quota_connection;
+
   procedure global_overload
     (reporter : in out Clair.Test.Reporter.Context)
   is
@@ -576,14 +962,14 @@ package body Tests.Management is
     executor    : aliased E.Context;
     application : aliased Null_Application;
     admission   : aliased RA.Context
-      (connection_limit => 1,
-       request_limit    => 1);
+      (max_connections => 1,
+       max_requests    => 1);
     connection  : aliased RC.Context
       (max_requests_per_connection => 2,
        max_name_bytes              => 64,
        max_value_bytes             => 64,
        max_request_output_bytes    => 1024,
-       max_output_bytes            => 1024,
+       max_connection_output_bytes => 1024,
        read_buffer_bytes           => 128,
        write_chunk_bytes           => 128);
     runtime_raw  : aliased Interfaces.C.int := -1;
@@ -592,28 +978,32 @@ package body Tests.Management is
     peer_fd      : Clair.IO.Descriptor;
     native_error : Interfaces.C.int;
     status       : Clair.Status.Code;
+    accepted     : Boolean;
+    outcome      : RC.Initialization_Outcome;
     dispatched   : Boolean;
-    begin_body   : constant M.Begin_Request_Body :=
-      (role_code => P.RESPONDER_ROLE,
+    begin_body   : constant B.Begin_Request_Body :=
+      (role_code => P.RESPONDER_CODE,
        flags     => P.KEEP_CONN);
-    begin_bytes  : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes  : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     begin_written : Natural;
-    body_status   : M.Body_Status;
+    body_status   : B.Body_Status;
+    overload_burst_count : constant Positive := 20;
     input         : P.Byte_Array
-      (1 .. 2 * (P.HEADER_LENGTH + M.BEGIN_REQUEST_BODY_LENGTH));
+      (1 .. (overload_burst_count + 1) *
+        (P.HEADER_LENGTH + B.BEGIN_REQUEST_BODY_LENGTH));
     input_pos     : Positive := input'first;
-    output        : P.Byte_Array (1 .. 64);
+    output        : P.Byte_Array (1 .. 512);
     output_len    : Natural := 0;
     header        : P.Header;
     decode_status : C.Decode_Status;
-    end_body      : M.End_Request_Body;
+    end_body      : B.End_Request_Body;
   begin
-    M.encode_begin_request
-      (begin_body, begin_bytes, begin_written, body_status);
+    body_status := B.encode_begin_request
+      (begin_body, begin_bytes, begin_written);
     A.assert_true
       (reporter,
-       body_status = M.Body_Complete and then
-       begin_written = M.BEGIN_REQUEST_BODY_LENGTH,
+       body_status = B.Body_Complete and then
+       begin_written = B.BEGIN_REQUEST_BODY_LENGTH,
        "overload BEGIN_REQUEST body encodes");
 
     native_error := c_socketpair (runtime_raw'access, peer_raw'access);
@@ -640,41 +1030,75 @@ package body Tests.Management is
     A.assert_true
       (reporter, status = Clair.Status.OK,
        "overload executor initializes");
+    accepted := RA.try_acquire_connection (admission);
+    A.assert_true
+      (reporter, accepted, "overload fixture occupies connection admission");
     status := RC.initialize
       (connection,
        event_loop'Unchecked_Access,
        runtime_fd,
        application'Unchecked_Access,
        executor'Unchecked_Access,
-       request_timeout => 60_000,
-       connection_id   => 21,
-       admission       => admission'Unchecked_Access);
+       request_lifetime_timeout => 60_000,
+       admission       => admission'Unchecked_Access,
+       outcome          => outcome);
     A.assert_true
-      (reporter, status = Clair.Status.OK,
-       "overload connection initializes");
+      (reporter, status = Clair.Status.OK and then
+       outcome = RC.Capacity_Refused,
+       "connection admission saturation is a non-error refusal");
+    A.assert_false
+      (reporter, RC.is_active(connection),
+       "admission refusal leaves connection uninitialized");
+    RA.release_connection (admission);
 
-    append_record (input, input_pos, P.BEGIN_REQUEST_TYPE, 1, begin_bytes);
-    append_record (input, input_pos, P.BEGIN_REQUEST_TYPE, 2, begin_bytes);
+    status := RC.initialize
+      (connection,
+       event_loop'Unchecked_Access,
+       runtime_fd,
+       application'Unchecked_Access,
+       executor'Unchecked_Access,
+       request_lifetime_timeout => 60_000,
+       admission       => admission'Unchecked_Access,
+       outcome          => outcome);
+    A.assert_true
+      (reporter, status = Clair.Status.OK and then outcome = RC.Activated,
+       "overload connection initializes with admission");
+
+    append_record (input, input_pos, P.BEGIN_REQUEST, 1, begin_bytes);
+    for request_id in 2 .. overload_burst_count + 1 loop
+      append_record
+        (input, input_pos, P.BEGIN_REQUEST,
+         P.Request_Id(request_id), begin_bytes);
+    end loop;
     status := write_all (peer_fd, input);
     A.assert_true
       (reporter, status = Clair.Status.OK,
-       "two BEGIN_REQUEST records are written");
+       "overload BEGIN_REQUEST burst is written");
 
-    for attempt in 1 .. 50 loop
+    for attempt in 1 .. 150 loop
       pragma Unreferenced (attempt);
       status := Clair.Event_Loop.iterate (event_loop, 10, dispatched);
       exit when status /= Clair.Status.OK;
       read_peer (peer_fd, output, output_len);
       exit when
-        output_len >= P.HEADER_LENGTH + M.END_REQUEST_BODY_LENGTH and then
+        output_len = overload_burst_count *
+          (P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH) and then
         RC.pending_output_bytes(connection) = 0;
     end loop;
 
+    A.assert_equal_natural
+      (reporter, output_len,
+       overload_burst_count *
+         (P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH),
+       "OVERLOADED backpressure preserves every refusal response");
+    A.assert_true
+      (reporter, RC.is_active(connection),
+       "OVERLOADED control burst preserves the FastCGI connection");
+
     if output_len >= P.HEADER_LENGTH then
-      C.decode_header
+      decode_status := C.decode_header
         (output(output'first .. output'first + P.HEADER_LENGTH - 1),
-         header,
-         decode_status);
+         header);
     else
       decode_status := C.Need_More_Data;
     end if;
@@ -682,28 +1106,27 @@ package body Tests.Management is
     A.assert_true
       (reporter,
        decode_status = C.Complete and then
-       header.record_type = P.END_REQUEST_TYPE and then
+       header.record_type = P.END_REQUEST and then
        header.request_id = 2,
        "global request exhaustion rejects the second request");
 
-    if output_len >= P.HEADER_LENGTH + M.END_REQUEST_BODY_LENGTH then
-      M.decode_end_request
+    if output_len >= P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH then
+      body_status := B.decode_end_request
         (output
            (output'first + P.HEADER_LENGTH ..
-            output'first + P.HEADER_LENGTH + M.END_REQUEST_BODY_LENGTH - 1),
-         end_body,
-         body_status);
+            output'first + P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH - 1),
+         end_body);
     else
-      body_status := M.Invalid_Body_Length;
+      body_status := B.Invalid_Body_Length;
     end if;
 
     A.assert_true
       (reporter,
-       body_status = M.Body_Complete and then
-       end_body.protocol_status_code = P.OVERLOADED_STATUS,
+       body_status = B.Body_Complete and then
+       end_body.protocol_status_code = P.OVERLOADED,
        "global request exhaustion maps to FCGI_OVERLOADED");
     A.assert_equal_natural
-      (reporter, RC.active_request_count(connection), 1,
+      (reporter, RC.active_requests(connection), 1,
        "first request remains active after overload refusal");
     A.assert_equal_natural
       (reporter, RA.active_requests(admission), 1,
@@ -739,11 +1162,16 @@ package body Tests.Management is
   is
   begin
     Clair.Test.Reporter.run_scenario
+      (reporter, "noncanonical query lengths", noncanonical_query_lengths'access);
+    Clair.Test.Reporter.run_scenario
       (reporter,
        "management admission accounting",
        admission_accounting'access);
     Clair.Test.Reporter.run_scenario
       (reporter, "FastCGI management records", management_records'access);
+    Clair.Test.Reporter.run_scenario
+      (reporter, "zero request quota connection",
+       zero_request_quota_connection'access);
     Clair.Test.Reporter.run_scenario
       (reporter, "global request overload", global_overload'access);
   end run;

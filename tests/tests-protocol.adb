@@ -19,17 +19,16 @@ package body Tests.Protocol is
   is
     source : constant P.Header :=
       (version        => P.VERSION_1,
-       record_type    => P.PARAMS_TYPE,
+       record_type    => P.PARAMS,
        request_id     => 16#1234#,
        content_length => 16#4567#,
-       padding_length => 8,
-       reserved       => 0);
+       padding_length => 8);
     bytes   : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
     decoded : P.Header;
     status  : C.Decode_Status;
   begin
     C.encode_header (source, bytes);
-    C.decode_header (bytes, decoded, status);
+    status := C.decode_header (bytes, decoded);
 
     A.assert_true (reporter, status = C.Complete, "header decode completes");
     A.assert_equal_integer
@@ -52,11 +51,10 @@ package body Tests.Protocol is
   is
     source : constant P.Header :=
       (version        => P.VERSION_1,
-       record_type    => P.STDIN_TYPE,
+       record_type    => P.STDIN,
        request_id     => 42,
        content_length => 3,
-       padding_length => 5,
-       reserved       => 0);
+       padding_length => 5);
     bytes   : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
     decoder : C.Header_Decoder;
     decoded : P.Header;
@@ -65,7 +63,7 @@ package body Tests.Protocol is
     C.encode_header (source, bytes);
 
     for index in bytes'range loop
-      C.feed (decoder, bytes(index), decoded, status);
+      status := C.feed (decoder, bytes(index), decoded);
 
       if index < bytes'last then
         A.assert_true
@@ -91,25 +89,34 @@ package body Tests.Protocol is
     status        : C.Decode_Status;
   begin
     bytes(0) := 2;
-    bytes(1) := P.PARAMS_TYPE;
+    bytes(1) := P.PARAMS;
     bytes(3) := 1;
-    C.decode_header (bytes, record_header, status);
+    status := C.decode_header (bytes, record_header);
     A.assert_true
       (reporter, status = C.Unsupported_Version,
        "unsupported FastCGI version is rejected");
+    A.assert_equal_integer
+      (reporter, Integer(record_header.version), 2,
+       "unsupported-version decode still reports the wire version");
 
     bytes(0) := P.VERSION_1;
     bytes(3) := 0;
-    C.decode_header (bytes, record_header, status);
+    status := C.decode_header (bytes, record_header);
     A.assert_true
       (reporter, status = C.Invalid_Request_Id_Domain,
        "application record rejects null request id");
+    A.assert_equal_integer
+      (reporter, Integer(record_header.request_id), 0,
+       "invalid request-id decode exposes the parsed request id");
 
-    bytes(1) := P.GET_VALUES_TYPE;
-    C.decode_header (bytes, record_header, status);
+    bytes(1) := P.GET_VALUES;
+    status := C.decode_header (bytes, record_header);
     A.assert_true
       (reporter, status = C.Complete,
        "management record accepts null request id");
+    A.assert_equal_integer
+      (reporter, Integer(record_header.record_type), Integer(P.GET_VALUES),
+       "validated management header is returned");
   end header_validation;
 
   procedure wire_boundaries
@@ -117,18 +124,17 @@ package body Tests.Protocol is
   is
     source : constant P.Header :=
       (version        => P.VERSION_1,
-       record_type    => P.PARAMS_TYPE,
-       request_id     => P.Request_Id_Type'Last,
-       content_length => P.Content_Length_Type'Last,
-       padding_length => P.Byte'Last,
-       reserved       => P.Byte'Last);
+       record_type    => P.PARAMS,
+       request_id     => P.Request_Id'Last,
+       content_length => P.Content_Length'Last,
+       padding_length => P.Byte'Last);
     bytes   : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
     short   : P.Byte_Array (0 .. P.HEADER_LENGTH - 2);
     decoded : P.Header;
     status  : C.Decode_Status;
   begin
     C.encode_header (source, bytes);
-    C.decode_header (bytes, decoded, status);
+    status := C.decode_header (bytes, decoded);
     A.assert_true
       (reporter, status = C.Complete, "maximum wire header decodes");
     A.assert_equal_integer
@@ -140,12 +146,27 @@ package body Tests.Protocol is
     A.assert_equal_integer
       (reporter, Integer(decoded.padding_length), 255,
        "maximum padding length is preserved");
+    A.assert_equal_integer
+      (reporter, Integer(bytes(bytes'first + 7)), 0,
+       "header encoder always clears the reserved byte");
+
+    bytes(bytes'first + 7) := P.Byte'Last;
+    status := C.decode_header (bytes, decoded);
+    A.assert_true
+      (reporter, status = C.Complete,
+       "header decoder ignores a nonzero reserved input byte");
+    A.assert_equal_integer
+      (reporter, Integer(decoded.request_id), Integer(source.request_id),
+       "reserved input byte does not alter decoded request id");
 
     short := bytes(short'range);
-    C.decode_header (short, decoded, status);
+    status := C.decode_header (short, decoded);
     A.assert_true
       (reporter, status = C.Need_More_Data,
        "seven header bytes remain incomplete");
+    A.assert_equal_integer
+      (reporter, Integer(decoded.record_type), 0,
+       "short header leaves a default-initialized output");
   end wire_boundaries;
 
   procedure request_id_domains
@@ -153,11 +174,11 @@ package body Tests.Protocol is
   is
     type Type_List is array (Positive range <>) of P.Byte;
     application_types : constant Type_List :=
-      [P.BEGIN_REQUEST_TYPE, P.ABORT_REQUEST_TYPE, P.END_REQUEST_TYPE,
-       P.PARAMS_TYPE, P.STDIN_TYPE, P.STDOUT_TYPE, P.STDERR_TYPE,
-       P.DATA_TYPE];
+      [P.BEGIN_REQUEST, P.ABORT_REQUEST, P.END_REQUEST,
+       P.PARAMS, P.STDIN, P.STDOUT, P.STDERR,
+       P.DATA];
     management_types : constant Type_List :=
-      [P.GET_VALUES_TYPE, P.GET_VALUES_RESULT_TYPE, P.UNKNOWN_TYPE_TYPE];
+      [P.GET_VALUES, P.GET_VALUES_RESULT, P.UNKNOWN_TYPE];
     bytes         : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
     record_header : P.Header;
     status        : C.Decode_Status;
@@ -165,8 +186,8 @@ package body Tests.Protocol is
     for record_type of application_types loop
       C.encode_header
         ((version => P.VERSION_1, record_type => record_type, request_id => 0,
-          content_length => 0, padding_length => 0, reserved => 0), bytes);
-      C.decode_header (bytes, record_header, status);
+          content_length => 0, padding_length => 0), bytes);
+      status := C.decode_header (bytes, record_header);
       A.assert_true
         (reporter, status = C.Invalid_Request_Id_Domain,
          "application record rejects request id zero");
@@ -175,26 +196,35 @@ package body Tests.Protocol is
     for record_type of management_types loop
       C.encode_header
         ((version => P.VERSION_1, record_type => record_type, request_id => 1,
-          content_length => 0, padding_length => 0, reserved => 0), bytes);
-      C.decode_header (bytes, record_header, status);
+          content_length => 0, padding_length => 0), bytes);
+      status := C.decode_header (bytes, record_header);
       A.assert_true
         (reporter, status = C.Invalid_Request_Id_Domain,
          "management record rejects nonzero request id");
+      A.assert_equal_integer
+        (reporter, Integer(record_header.request_id), 1,
+         "rejected management header preserves parsed request id");
     end loop;
 
     C.encode_header
       ((version => P.VERSION_1, record_type => 99, request_id => 0,
-        content_length => 0, padding_length => 0, reserved => 0), bytes);
-    C.decode_header (bytes, record_header, status);
+        content_length => 0, padding_length => 0), bytes);
+    status := C.decode_header (bytes, record_header);
     A.assert_true
       (reporter, status = C.Complete,
        "unknown management type accepts request id zero");
+    A.assert_equal_integer
+      (reporter, Integer(record_header.record_type), 99,
+       "unknown management type remains observable to the caller");
 
     bytes(3) := 1;
-    C.decode_header (bytes, record_header, status);
+    status := C.decode_header (bytes, record_header);
     A.assert_true
       (reporter, status = C.Invalid_Request_Id_Domain,
        "unknown record type rejects nonzero request id");
+    A.assert_equal_integer
+      (reporter, Integer(record_header.request_id), 1,
+       "rejected unknown header preserves parsed request id");
   end request_id_domains;
 
   procedure run

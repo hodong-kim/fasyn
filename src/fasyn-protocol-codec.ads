@@ -23,30 +23,39 @@ package Fasyn.Protocol.Codec is
   procedure reset (self : in out Header_Decoder);
   procedure reset (self : in out Record_Decoder);
 
-  procedure feed
+  --! Consumes one header byte. `record_header` is reset on each call;
+  --! `Complete` means a validated FastCGI/1.0 header is available. After
+  --! completion, the decoder resets automatically on the next call.
+  function feed
     (self          : in out Header_Decoder;
      value         : in Byte;
-     record_header : out Header;
-     status        : out Decode_Status);
+     record_header : out Header) return Decode_Status;
 
-  procedure feed
+  --! Consumes one record byte. After a complete record, the decoder resets
+  --! automatically on the next call. `event` identifies the consumed phase;
+  --! content and padding events report `Complete`.
+  function feed
     (self          : in out Record_Decoder;
      value         : in Byte;
      event         : out Record_Event;
-     record_header : out Header;
-     status        : out Decode_Status);
+     record_header : out Header) return Decode_Status;
 
-  function record_complete (self : Record_Decoder) return Boolean;
+  function is_complete (self : Record_Decoder) return Boolean;
 
+  --! Requires at least `HEADER_LENGTH` output bytes; otherwise raises
+  --! `Constraint_Error`.
   procedure encode_header
     (record_header : in Header;
      output        : out Byte_Array);
 
-  procedure decode_header
+  --! Decodes the first `HEADER_LENGTH` bytes. Short input returns
+  --! `Need_More_Data` with a default-initialized header.
+  function decode_header
     (input         : in Byte_Array;
-     record_header : out Header;
-     status        : out Decode_Status);
+     record_header : out Header) return Decode_Status;
 
+  --! Management and unknown record types require request ID zero; known
+  --! application record types require a nonzero request ID.
   function validate_request_id_domain
     (record_header : Header)
   return Boolean;

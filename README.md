@@ -32,8 +32,8 @@ Set `FASYN_CLAIR_ROOT` to use a Clair checkout at another location.
 
 The core protocol library built by `fasyn.gpr` does not depend on Clair's POSIX
 I/O layer. The asynchronous runtime under `src/runtime` uses `Clair.IO.Posix`
-and is supported on Linux and FreeBSD. Windows runtime support is not part of
-the current public contract.
+and is supported on Linux, FreeBSD, and macOS. Windows runtime support is not
+part of the current public contract.
 
 ## Building
 
@@ -43,20 +43,37 @@ those target values are supplied explicitly.
 
     rake build
 
-Run the native test suite with:
+Run the canonical native acceptance suite, including the bounded long-run
+RSS/FD soak, with:
 
     rake test
+
+For the single-pass development loop, use:
+
+    rake test-fast
+
+Fasyn also carries an Alire manifest that exports the protocol and runtime GPR
+projects and declares Clair as a production dependency. Alire remains optional;
+the existing Rake/GPRbuild workflow does not require `alr`. On Linux x86-64,
+the repository integration is validated with:
+
+    rake test-alire
+
+That acceptance covers an Alire root build and a separate external consumer of
+the Clair-backed runtime. Catalog publication remains gated on a publicly
+resolvable Clair crate, clean unpinned catalog acceptance, and an explicit
+Fasyn publication decision; no local dependency pin is committed to Fasyn.
 
 Run the independent NGINX interoperability acceptance with:
 
     rake interop:nginx
 
-See `docs/development/building.md` and `docs/development/testing.md` for details.
+See `docs/workflows/building.md` and `docs/workflows/testing.md` for details.
 
 ## Documentation
 
-Architecture, conformance, resource, runtime, testing, and development documents
-are indexed in `docs/README.md`.
+Architecture contracts, workflows, source conventions, and active roadmaps are
+routed through `docs/README.md`.
 
 ## License
 

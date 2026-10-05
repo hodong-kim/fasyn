@@ -53,11 +53,12 @@ The decoder shall correctly process:
 - 16-bit `requestId`;
 - 16-bit `contentLength`;
 - `paddingLength`;
-- the reserved byte;
+- the reserved byte, consumed and ignored on input;
 - zero to 65535 content bytes;
 - zero to 255 padding bytes.
 
-Padding bytes are ignored semantically but consumed exactly.
+Padding bytes are ignored semantically but consumed exactly. Header encoders
+always emit zero for the reserved byte; it is not application-visible state.
 
 Management records use request ID 0. Application records use nonzero request
 IDs.
@@ -109,8 +110,9 @@ For `FCGI_GET_VALUES`, support the standard variable names:
 - `FCGI_MAX_REQS`;
 - `FCGI_MPXS_CONNS`.
 
-Reported values shall describe actual configured/runtime capabilities, not
-unreachable theoretical maxima.
+Unknown variable names are consumed and omitted from the result rather than
+treated as protocol errors. Reported values shall describe actual
+configured/runtime capabilities, not unreachable theoretical maxima.
 
 Unknown management record types shall produce `FCGI_UNKNOWN_TYPE` as specified.
 
@@ -283,12 +285,16 @@ The automated suite links the conformance areas above to these scenarios:
   content/padding consumption, maximum record boundaries, and deterministic
   arbitrary-byte decoder fuzz;
 - name-value encoding: `Tests.Name_Values` covers one-byte/four-byte boundaries,
-  policy limits, deterministic round-trip properties, and arbitrary-byte fuzz;
+  noncanonical four-byte length rejection, policy limits, deterministic round-trip
+  properties, and arbitrary-byte fuzz; `Tests.Management` covers the same
+  canonical-length requirement for bounded `FCGI_GET_VALUES` matching;
   `Tests.Responder` sweeps every FastCGI-record split of a pair using four-byte
   name and value lengths;
 - management records and protocol statuses: `Tests.Management` covers
-  `FCGI_GET_VALUES`, effective capacity advertisement, `FCGI_UNKNOWN_TYPE`, and
-  `FCGI_OVERLOADED`; `Tests.Multiplexing` covers `FCGI_CANT_MPX_CONN`;
+  `FCGI_GET_VALUES`, long unknown variable omission, effective capacity
+  advertisement, burst `FCGI_GET_VALUES_RESULT`/`FCGI_UNKNOWN_TYPE` control
+  backpressure, and burst `FCGI_OVERLOADED`;
+  `Tests.Multiplexing` covers `FCGI_CANT_MPX_CONN`;
   `Tests.Responder` covers `FCGI_UNKNOWN_ROLE`;
 - request lifecycle and generation isolation: `Tests.Responder` covers ignored
   inactive records; `Tests.Multiplexing` covers interleaving, out-of-order
@@ -299,9 +305,8 @@ The automated suite links the conformance areas above to these scenarios:
   required output to drain;
 - role semantics: `Tests.Responder`, `Tests.Authorizer`, and `Tests.Filter`
   cover all three FastCGI roles, stream sequencing, application/protocol
-  status
-  separation, Filter metadata validation, short/overlong DATA, and cache
-  shortcut completion;
+  status separation, Filter metadata validation including unsigned-length
+  overflow rejection, short/overlong DATA, and cache shortcut completion;
 - stream termination and cancellation: Responder/Authorizer/Filter scenarios
   cover FastCGI EOF and `FCGI_END_REQUEST`; `Tests.Multiplexing` verifies that
   aborting one request preserves its sibling; `Tests.Runtime` covers abort while
@@ -310,10 +315,12 @@ The automated suite links the conformance areas above to these scenarios:
 - configured resource exhaustion: `Tests.Execution` covers worker/pending-job
   saturation; `Tests.Management` covers global request admission;
   `Tests.Multiplexing` covers per-connection request capacity and verifies that
-  a resource-limited request preserves its sibling; `Tests.Runtime` covers
+  both total-stream and resident PARAMS resource limits preserve a multiplexed
+  sibling; `Tests.Runtime` covers
   PARAMS, STDIN, and DATA below/exact/above total limits, bounded
-  backpressure, rejected-record discard timeout, and completed-output stall
-  timeout;
+  backpressure, rejected-record discard timeout, completed-output stall timeout,
+  per-dispatch input/output byte budgets, and repeated spurious readiness with
+  zero progress; `Tests.Responder` covers circular writer reuse across wraparound;
 - malformed input and error scope: `Tests.Responder` covers malformed discrete
   bodies, invalid sequencing, truncated name-value lengths, and invalid record
   types; `Tests.Runtime` covers truncated transport input and protocol

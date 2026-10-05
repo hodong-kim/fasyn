@@ -35,11 +35,10 @@ package body Fasyn.Protocol.Codec is
     self.complete_flag := False;
   end reset;
 
-  procedure feed
+  function feed
     (self          : in out Header_Decoder;
      value         : in Byte;
-     record_header : out Header;
-     status        : out Decode_Status)
+     record_header : out Header) return Decode_Status
   is
   begin
     record_header := (others => <>);
@@ -52,45 +51,42 @@ package body Fasyn.Protocol.Codec is
     self.received := self.received + 1;
 
     if self.received < HEADER_LENGTH then
-      status := Need_More_Data;
-      return;
+      return Need_More_Data;
     end if;
 
-    decode_header (self.bytes, record_header, status);
+    return decode_header (self.bytes, record_header);
   end feed;
 
-  procedure feed
+  function feed
     (self          : in out Record_Decoder;
      value         : in Byte;
      event         : out Record_Event;
-     record_header : out Header;
-     status        : out Decode_Status)
+     record_header : out Header) return Decode_Status
   is
     decoded_header : Header;
+    status         : Decode_Status := Complete;
   begin
     if self.complete_flag then
       reset (self);
     end if;
 
     record_header := self.current_header;
-    status := Complete;
 
     case self.phase is
       when Reading_Header =>
-        feed
+        status := feed
           (self          => self.header_parser,
            value         => value,
-           record_header => decoded_header,
-           status        => status);
+           record_header => decoded_header);
 
         if status = Need_More_Data then
           event := Header_Progress;
-          return;
+          return status;
         end if;
 
         if status /= Complete then
           event := Decode_Error;
-          return;
+          return status;
         end if;
 
         self.current_header := decoded_header;
@@ -127,12 +123,14 @@ package body Fasyn.Protocol.Codec is
           self.complete_flag := True;
         end if;
     end case;
+
+    return status;
   end feed;
 
-  function record_complete (self : Record_Decoder) return Boolean is
+  function is_complete (self : Record_Decoder) return Boolean is
   begin
     return self.complete_flag;
-  end record_complete;
+  end is_complete;
 
   procedure encode_header
     (record_header : in Header;
@@ -151,21 +149,19 @@ package body Fasyn.Protocol.Codec is
     output(first + 4) := high_byte (record_header.content_length);
     output(first + 5) := low_byte (record_header.content_length);
     output(first + 6) := record_header.padding_length;
-    output(first + 7) := record_header.reserved;
+    output(first + 7) := 0;
   end encode_header;
 
-  procedure decode_header
+  function decode_header
     (input         : in Byte_Array;
-     record_header : out Header;
-     status        : out Decode_Status)
+     record_header : out Header) return Decode_Status
   is
     first : constant Natural := input'first;
   begin
     record_header := (others => <>);
 
     if input'length < HEADER_LENGTH then
-      status := Need_More_Data;
-      return;
+      return Need_More_Data;
     end if;
 
     record_header.version := input(first);
@@ -177,19 +173,16 @@ package body Fasyn.Protocol.Codec is
       Interfaces.Unsigned_16(input(first + 4)) * 256 +
       Interfaces.Unsigned_16(input(first + 5));
     record_header.padding_length := input(first + 6);
-    record_header.reserved := input(first + 7);
 
     if record_header.version /= VERSION_1 then
-      status := Unsupported_Version;
-      return;
+      return Unsupported_Version;
     end if;
 
     if not validate_request_id_domain (record_header) then
-      status := Invalid_Request_Id_Domain;
-      return;
+      return Invalid_Request_Id_Domain;
     end if;
 
-    status := Complete;
+    return Complete;
   end decode_header;
 
   function validate_request_id_domain

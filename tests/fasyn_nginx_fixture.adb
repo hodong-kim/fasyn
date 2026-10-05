@@ -11,6 +11,7 @@ with Fasyn.Listener;
 with Fasyn.Protocol;
 with Fasyn.Request;
 with Fasyn.Request.Connection;
+with Fasyn.Request.Connection.Testing;
 with Fasyn.Request.Execution;
 
 procedure Fasyn_Nginx_Fixture is
@@ -18,6 +19,7 @@ procedure Fasyn_Nginx_Fixture is
   package P renames Fasyn.Protocol;
   package R renames Fasyn.Request;
   package RC renames Fasyn.Request.Connection;
+  package RCT renames Fasyn.Request.Connection.Testing;
   package E renames Fasyn.Request.Execution;
 
   use type Clair.Status.Code;
@@ -69,29 +71,29 @@ procedure Fasyn_Nginx_Fixture is
 
   overriding procedure on_parameter
     (self    : in out Nginx_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array);
 
   overriding procedure on_params_end
     (self     : in out Nginx_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_stdin
     (self     : in out Nginx_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer);
 
   overriding procedure on_stdin_end
     (self     : in out Nginx_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_parameter
     (self    : in out Nginx_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array)
   is
@@ -106,7 +108,7 @@ procedure Fasyn_Nginx_Fixture is
 
   overriding procedure on_params_end
     (self     : in out Nginx_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (context, response);
@@ -116,7 +118,7 @@ procedure Fasyn_Nginx_Fixture is
 
   overriding procedure on_stdin
     (self     : in out Nginx_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer)
   is
@@ -148,31 +150,32 @@ procedure Fasyn_Nginx_Fixture is
       "Content-Type: text/plain" & CRLF &
       "Content-Length: 21" & CRLF & CRLF &
       "fasyn-nginx-mismatch" & Character'Val(10);
-    write_status  : R.Write_Status;
-    finish_status : R.Write_Status;
+    write_status : R.Write_Status;
   begin
     if success then
       declare
         data : constant P.Byte_Array := to_bytes (success_text);
       begin
-        R.write_stdout (response, data, write_status);
+        write_status := R.write_stdout (response, data);
       end;
     else
       declare
         data : constant P.Byte_Array := to_bytes (failure_text);
       begin
-        R.write_stdout (response, data, write_status);
+        write_status := R.write_stdout (response, data);
       end;
     end if;
 
-    if write_status = R.Write_Complete then
-      R.finish (response, 0, finish_status);
+    if write_status = R.Write_Complete and then
+       R.finish (response, 0) /= R.Write_Complete
+    then
+      raise Program_Error with "NGINX fixture response finish failed";
     end if;
   end write_response;
 
   overriding procedure on_stdin_end
     (self     : in out Nginx_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     pragma Unreferenced (context);
@@ -206,7 +209,7 @@ procedure Fasyn_Nginx_Fixture is
        max_name_bytes              => 256,
        max_value_bytes             => 1_024,
        max_request_output_bytes    => 1_024,
-       max_output_bytes            => 1_024,
+       max_connection_output_bytes => 1_024,
        read_buffer_bytes           => 512,
        write_chunk_bytes           => 256);
     accepted : Boolean := False;
@@ -222,14 +225,13 @@ procedure Fasyn_Nginx_Fixture is
       return Clair.IO.close (fd);
     end if;
 
-    status := RC.initialize
+    status := RCT.initialize_without_shared_admission
       (self            => self.connection,
        event_loop      => self.event_loop,
        fd              => fd,
-       handler         => self.application'Unchecked_Access,
+       application => self.application'Unchecked_Access,
        executor        => self.executor,
-       request_timeout => 5_000,
-       connection_id   => 1,
+       request_lifetime_timeout => 5_000,
        input_limits    =>
          (max_params_bytes => 16_384,
           max_stdin_bytes  => 1_024,

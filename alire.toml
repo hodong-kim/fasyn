@@ -1,0 +1,17 @@
+name = "fasyn"
+description = "FastCGI 1.0 application-side library and asynchronous runtime"
+version = "1.0.0"
+
+authors = ["Hodong Kim"]
+maintainers = ["Hodong Kim <hodong@nimfsoft.com>"]
+maintainers-logins = ["hodong-kim"]
+licenses = "0BSD"
+tags = ["fastcgi", "server", "network"]
+website = "https://gitlab.com/hodong-kim/fasyn"
+project-files = ["fasyn.gpr", "fasyn_runtime.gpr"]
+
+[configuration]
+disabled = true
+
+[[depends-on]]
+clair = "^2.0.0"

@@ -4,7 +4,7 @@
 -- ============================================================================
 with Clair.Event_Loop;
 with Clair.IO;
-with Clair.Network;
+private with Clair.Unix.Network;
 with Clair.Status;
 with Fasyn.Diagnostics;
 with Fasyn.Listener;
@@ -15,12 +15,7 @@ package Fasyn.Classic is
     Clair.IO.Descriptor(0);
   FCGI_WEB_SERVER_ADDRS : constant String := "FCGI_WEB_SERVER_ADDRS";
 
-  --! The FastCGI variable has no protocol-defined count limit. Fasyn bounds the
-  --! startup policy representation so hostile or accidental process
-  --! configuration cannot create unbounded resident state.
-  MAX_WEB_SERVER_ADDRESSES : constant Positive := 64;
-
-  type Context is limited new Fasyn.Listener.Accept_Handler with private;
+  type Context is limited private;
 
   --! Reads FCGI_WEB_SERVER_ADDRS once, validates it, and starts watching the
   --! inherited FastCGI listener on file descriptor 0. The descriptor remains
@@ -28,9 +23,9 @@ package Fasyn.Classic is
   --! `handler`, and any supplied `diagnostics` object, must remain alive until
   --! this Context has finalized successfully.
   function initialize
-    (self        : in out Context;
-     event_loop  : Clair.Event_Loop.Context_Access;
-     handler     : Fasyn.Listener.Accept_Handler_Access;
+    (self        : aliased in out Context;
+     event_loop  : not null Clair.Event_Loop.Context_Access;
+     handler     : not null Fasyn.Listener.Accept_Handler_Access;
      diagnostics : Fasyn.Diagnostics.Reporter_Access := null)
   return Clair.Status.Code;
 
@@ -43,16 +38,28 @@ package Fasyn.Classic is
 
   function is_active (self : Context) return Boolean;
 
-  overriding function on_accept
-    (self : in out Context;
-     fd   : Clair.IO.Descriptor) return Clair.Status.Code;
-
 private
 
-  subtype Address_Index is Positive range 1 .. MAX_WEB_SERVER_ADDRESSES;
-  type Address_Array is array (Address_Index) of Clair.Network.IPv4_Address;
+  -- The FastCGI variable has no protocol-defined count limit. Keep the
+  -- startup representation bounded without exposing its storage cap as an
+  -- application-facing configuration contract.
+  MAX_WEB_SERVER_ADDRESSES : constant Positive := 64;
 
-  type Context is limited new Fasyn.Listener.Accept_Handler with record
+  type Context_Access is access all Context;
+
+  type Accept_Adapter is limited new Fasyn.Listener.Accept_Handler with record
+    owner : Context_Access := null;
+  end record;
+
+  overriding function on_accept
+    (self : in out Accept_Adapter;
+     fd   : Clair.IO.Descriptor) return Clair.Status.Code;
+
+  subtype Address_Index is Positive range 1 .. MAX_WEB_SERVER_ADDRESSES;
+  type Address_Array is array (Address_Index) of Clair.Unix.Network.IPv4_Address;
+
+  type Context is limited record
+    accept_handler    : aliased Accept_Adapter;
     listener          : aliased Fasyn.Listener.Context;
     handler           : Fasyn.Listener.Accept_Handler_Access := null;
     diagnostics       : Fasyn.Diagnostics.Reporter_Access := null;

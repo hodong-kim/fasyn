@@ -17,6 +17,8 @@ package Fasyn.Diagnostics is
 
   --! Diagnostic reporting is a side channel. Implementations shall not perform
   --! transport I/O on a FastCGI connection and shall not raise exceptions.
+  --! Fasyn runtime boundaries defensively contain an escaped reporter exception
+  --! so diagnostic failure cannot prevent primary protocol/resource cleanup.
   procedure report
     (self     : in out Reporter;
      kind     : Category;

@@ -6,20 +6,26 @@ package body Fasyn.Protocol is
 
   use type Interfaces.Unsigned_8;
 
-  function is_management_record (record_type : Byte) return Boolean is
+  function is_management_record
+    (record_type : Fasyn.Protocol.Record_Type) return Boolean
+  is
   begin
-    return record_type = GET_VALUES_TYPE or else
-           record_type = GET_VALUES_RESULT_TYPE or else
-           record_type = UNKNOWN_TYPE_TYPE;
+    return record_type = GET_VALUES or else
+           record_type = GET_VALUES_RESULT or else
+           record_type = UNKNOWN_TYPE;
   end is_management_record;
 
-  function is_application_record (record_type : Byte) return Boolean is
+  function is_application_record
+    (record_type : Fasyn.Protocol.Record_Type) return Boolean
+  is
   begin
-    return record_type >= BEGIN_REQUEST_TYPE and then
-           record_type <= DATA_TYPE;
+    return record_type >= BEGIN_REQUEST and then
+           record_type <= DATA;
   end is_application_record;
 
-  function is_known_record_type (record_type : Byte) return Boolean is
+  function is_known_record_type
+    (record_type : Fasyn.Protocol.Record_Type) return Boolean
+  is
   begin
     return is_application_record (record_type) or else
            is_management_record (record_type);

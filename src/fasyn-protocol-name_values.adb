@@ -60,12 +60,11 @@ package body Fasyn.Protocol.Name_Values is
     return Natural(total);
   end encoded_size;
 
-  procedure encode_pair
+  function encode_pair
     (name    : in Byte_Array;
      value   : in Byte_Array;
      output  : out Byte_Array;
-     written : out Natural;
-     status  : out Encode_Status)
+     written : out Natural) return Encode_Status
   is
     required : constant Natural := encoded_size(name'length, value'length);
     position : Natural := output'first;
@@ -73,8 +72,7 @@ package body Fasyn.Protocol.Name_Values is
     written := 0;
 
     if output'length < required then
-      status := Output_Too_Small;
-      return;
+      return Output_Too_Small;
     end if;
 
     write_length (name'length, output, position);
@@ -91,7 +89,7 @@ package body Fasyn.Protocol.Name_Values is
     end loop;
 
     written := required;
-    status := Encode_Complete;
+    return Encode_Complete;
   end encode_pair;
 
   procedure reset (self : in out Decoder) is
@@ -99,6 +97,7 @@ package body Fasyn.Protocol.Name_Values is
     self.state := Name_Length_First;
     self.length_accumulator := 0;
     self.length_bytes_left := 0;
+    self.length_is_long := False;
     self.decoded_name_length := 0;
     self.decoded_value_length := 0;
     self.name_position := 0;
@@ -120,10 +119,12 @@ package body Fasyn.Protocol.Name_Values is
     if (value and 16#80#) = 0 then
       self.length_accumulator := Natural(value);
       self.length_bytes_left := 0;
+      self.length_is_long := False;
       self.state := complete_state;
     else
       self.length_accumulator := Natural(value and 16#7f#);
       self.length_bytes_left := 3;
+      self.length_is_long := True;
       self.state := rest_state;
     end if;
   end begin_length;
@@ -151,6 +152,12 @@ package body Fasyn.Protocol.Name_Values is
     self.decoded_name_length := self.length_accumulator;
     self.length_accumulator := 0;
 
+    if self.length_is_long and then self.decoded_name_length <= 127 then
+      self.state := Failed_State;
+      status := Malformed_Length;
+      return;
+    end if;
+
     if self.decoded_name_length > self.max_name_bytes then
       self.state := Failed_State;
       status := Limit_Exceeded;
@@ -168,6 +175,12 @@ package body Fasyn.Protocol.Name_Values is
   begin
     self.decoded_value_length := self.length_accumulator;
     self.length_accumulator := 0;
+
+    if self.length_is_long and then self.decoded_value_length <= 127 then
+      self.state := Failed_State;
+      status := Malformed_Length;
+      return;
+    end if;
 
     if self.decoded_value_length > self.max_value_bytes then
       self.state := Failed_State;
@@ -187,11 +200,11 @@ package body Fasyn.Protocol.Name_Values is
     end if;
   end finish_value_length;
 
-  procedure feed
-    (self   : in out Decoder;
-     value  : in Byte;
-     status : out Feed_Status)
+  function feed
+    (self  : in out Decoder;
+     value : in Byte) return Feed_Status
   is
+    status : Feed_Status;
   begin
     case self.state is
       when Name_Length_First =>
@@ -272,8 +285,10 @@ package body Fasyn.Protocol.Name_Values is
         end if;
 
       when Complete_State | Failed_State =>
-        status := Invalid_State;
+        raise Program_Error with "name-value decoder requires reset";
     end case;
+
+    return status;
   end feed;
 
   function name_length (self : Decoder) return Natural is
@@ -309,5 +324,21 @@ package body Fasyn.Protocol.Name_Values is
 
     return self.value_data(index);
   end value_byte;
+
+  procedure visit_pair
+    (self    : in Decoder;
+     visitor : not null access procedure
+       (name  : in Byte_Array;
+        value : in Byte_Array))
+  is
+  begin
+    if self.state /= Complete_State then
+      raise Program_Error with "name-value pair is not complete";
+    end if;
+
+    visitor
+      (self.name_data(1 .. self.decoded_name_length),
+       self.value_data(1 .. self.decoded_value_length));
+  end visit_pair;
 
 end Fasyn.Protocol.Name_Values;

@@ -2,34 +2,31 @@
 -- fasyn-protocol-management.ads
 -- Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
 -- ============================================================================
-with Fasyn.Protocol.Name_Values;
-
 package Fasyn.Protocol.Management is
 
   type Values is record
-    max_connections : Positive;
-    max_requests    : Positive;
+    max_connections : Natural;
+    max_requests    : Natural;
     multiplexing    : Boolean;
   end record;
-
-  type Query_Status is
-    (Query_Progress,
-     Query_Pair_Complete,
-     Query_Limit_Exceeded,
-     Query_Invalid);
 
   type Result_Status is
     (Result_Complete,
      Result_Output_Too_Small);
 
+  --! Incremental `GET_VALUES` query decoder. It retains only bounded matching
+  --! state for recognized names; unknown names and values are consumed without
+  --! retaining their contents.
   type Query is limited private;
 
   procedure reset (self : in out Query);
 
+  --! Completed pairs record recognized names and reset pair state so the next
+  --! pair can be consumed immediately. Use `at_pair_boundary` when the caller
+  --! needs to observe that boundary.
   procedure feed
-    (self   : in out Query;
-     value  : in Byte;
-     status : out Query_Status);
+    (self  : in out Query;
+     value : in Byte);
 
   function at_pair_boundary (self : Query) return Boolean;
 
@@ -37,27 +34,40 @@ package Fasyn.Protocol.Management is
   function wants_max_requests (self : Query) return Boolean;
   function wants_multiplexing (self : Query) return Boolean;
 
-  procedure encode_result
-    (self    : in Query;
+  --! Encodes only requested recognized values. On insufficient output,
+  --! `written` counts any complete pairs already emitted.
+  function encode_result
+    (self              : in Query;
      configured_values : in Values;
-     output  : out Byte_Array;
-     written : out Natural;
-     status  : out Result_Status);
+     output            : out Byte_Array;
+     written           : out Natural) return Result_Status;
 
 private
 
-  package N renames Fasyn.Protocol.Name_Values;
-
-  MANAGEMENT_NAME_LIMIT  : constant Positive := 32;
-  MANAGEMENT_VALUE_LIMIT : constant Positive := 32;
+  type Query_Phase is
+    (Name_Length_First,
+     Name_Length_Rest,
+     Value_Length_First,
+     Value_Length_Rest,
+     Name_Data,
+     Value_Data,
+     Malformed_State);
 
   type Query is limited record
-    decoder              : N.Decoder
-      (max_name_bytes  => MANAGEMENT_NAME_LIMIT,
-       max_value_bytes => MANAGEMENT_VALUE_LIMIT);
-    max_connections_seen : Boolean := False;
-    max_requests_seen    : Boolean := False;
-    multiplexing_seen    : Boolean := False;
+    phase                 : Query_Phase := Name_Length_First;
+    length_accumulator    : Natural := 0;
+    length_bytes_left     : Natural range 0 .. 3 := 0;
+    length_is_long        : Boolean := False;
+    name_length           : Natural := 0;
+    value_length          : Natural := 0;
+    name_position         : Natural := 0;
+    value_position        : Natural := 0;
+    max_connections_match : Boolean := False;
+    max_requests_match    : Boolean := False;
+    multiplexing_match    : Boolean := False;
+    max_connections_seen  : Boolean := False;
+    max_requests_seen     : Boolean := False;
+    multiplexing_seen     : Boolean := False;
   end record;
 
 end Fasyn.Protocol.Management;

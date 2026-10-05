@@ -128,6 +128,15 @@ buffer : aliased Interfaces.C.char_array (0 .. 31)
        := [others => Interfaces.C.char'val (0)];
 ```
 
+When the type portion itself does not fit, keep the type separator on the
+object-name line and continue the type on the next line.
+
+```ada
+payload           :
+  constant System.Storage_Elements.Storage_Array (1 .. 262_144)
+                  := [others => 16#55#];
+```
+
 Within a contiguous declaration block, object names and type separators may be
 aligned. Do not add alignment spaces to an isolated declaration.
 
@@ -209,9 +218,9 @@ procedure close_file (handle : File_Handle);
 
 ```ada
 procedure enqueue
-  (self    : in out Context;
-   item    : in Element_Type;
-   success : out Boolean);
+  (self     : in out Context;
+   item     : in Element_Type;
+   accepted : out Boolean);
 ```
 
 ```ada
@@ -287,9 +296,9 @@ may continue on the next line. Align the continuation under the conversion
 expression.
 
 ```ada
-timeout_ts : constant Clair.Time.Timespec :=
-  (tv_sec  => Clair.Time.time_t(actual_timeout / 1000),
-   tv_nsec => Interfaces.C.long
+timeout_ts : constant Clair.Time.Value :=
+  (seconds     => Clair.Time.Second_Count(actual_timeout / 1000),
+   nanoseconds => Clair.Time.Nanosecond_Count
                 ((actual_timeout rem 1000) * 1_000_000));
 ```
 
@@ -375,6 +384,26 @@ descriptive names such as `primary_status`, `cleanup_status`, or
 `close_status`. For data values, use a name that describes the value, such as
 `bytes_written`.
 
+Public Ada API verb semantics are owned by
+`../architecture/engineering-principles.md`. Do not choose `query_*` merely
+because an operation returns a status and publishes through an `out` parameter;
+preserve the documented `get_*` / `query_*` / `list_*` / infallible-property
+distinction. Internal bindings that mirror an external ABI may retain that ABI's
+established spelling.
+
+Public Ada formal parameter names are part of the source API because callers
+may use named association. Name public formals by their semantic role, such as
+`bytes_read`, `file_metadata`, or `required_length`, rather than generic output
+names such as `result` or C-style direction prefixes such as `out_length`.
+A formal name shall also avoid case-insensitive collision with a visible type
+name; for example, prefer `opened_descriptor : Descriptor` over
+`descriptor : Descriptor`.
+
+For public C collection APIs, use `_count` for the collection size and `_at` for
+zero-based indexed retrieval. Do not use `_item` or an unsuffixed accessor to
+encode the same indexed operation. C verbs such as `get_` and `query_` are
+reviewed according to C API semantics and do not mechanically mirror Ada names.
+
 ```ada
 pragma import (c, my_func)
 with convention => c
@@ -398,14 +427,15 @@ Capitalize each word and separate words with underscores for:
 Do not repeat a package name in a type declared inside that package. Use
 `File.Descriptor`, not `File.File_Descriptor`.
 
-Use all capitals for an abbreviation when mixed case would be misleading. Use
-`Clair.DL`, not `Clair.Dl`.
+Use all capitals for an established abbreviation when mixed case would be
+misleading. Use `Clair.YAML`, not `Clair.Yaml`. Do not introduce an abbreviation
+when a short complete public term is clearer.
 
 ```ada
 Library_Load_Error
 Main_Process_Loop
 Clair.Process
-Clair.DL
+Clair.YAML
 ```
 
 ### `UPPER_CASE_WITH_UNDERSCORES`
@@ -491,19 +521,9 @@ return behavior differ.
 
 ## `use` Clauses
 
-Avoid broad or unnecessary `use` clauses.
-
-A `use` clause may be used in a package body or narrow local scope when it
-improves readability and the origin of imported identifiers remains obvious.
-
-```ada
-use Adac.Frontend.Tokens;
-```
-
-Prefer explicit qualification when the source package is not obvious or when
-several packages define similar names.
-
-Do not combine broad packages in a way that obscures identifier origins.
+Do not add package-wide `use Package;` clauses in Clair source. Prefer explicit
+qualification. `use type` is allowed when it makes operators explicit without
+importing a package namespace. Do not add `use Interfaces.C;`.
 
 -----
 
@@ -526,7 +546,7 @@ environment abstractions.
 
 ```ada
 Clair.Event_Loop.Context
-Clair.DL.Handle
+Clair.Dynamic_Library.Handle
 ```
 
 ### Dot Notation

@@ -3,13 +3,12 @@
 -- Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
 -- ============================================================================
 with Ada.Environment_Variables;
-with Interfaces.C;
+with Interfaces;
 with Clair.Errno;
 
 package body Fasyn.Classic is
 
-  use type Clair.Event_Loop.Context_Access;
-  use type Clair.Network.IPv4_Address;
+  use type Clair.Unix.Network.IPv4_Address;
   use type Clair.Status.Code;
   use type Fasyn.Diagnostics.Reporter_Access;
   use type Fasyn.Listener.Accept_Handler_Access;
@@ -22,8 +21,13 @@ package body Fasyn.Classic is
   is
   begin
     if self.diagnostics /= null then
-      Fasyn.Diagnostics.report
-        (self.diagnostics.all, kind, status, message);
+      begin
+        Fasyn.Diagnostics.report
+          (self.diagnostics.all, kind, status, message);
+      exception
+        when others =>
+          null;
+      end;
     end if;
 
     return status;
@@ -33,7 +37,7 @@ package body Fasyn.Classic is
     (self  : in out Context;
      value : String) return Clair.Status.Code
   is
-    address       : Clair.Network.IPv4_Address := [others => 0];
+    address       : Clair.Unix.Network.IPv4_Address := [others => 0];
     address_count : Natural := 0;
     octet_index   : Positive range 1 .. 4 := 1;
     octet_value   : Natural := 0;
@@ -45,7 +49,7 @@ package body Fasyn.Classic is
         return False;
       end if;
 
-      address(octet_index) := Interfaces.C.unsigned_char(octet_value);
+      address(octet_index) := Interfaces.Unsigned_8(octet_value);
       octet_value := 0;
       digit_count := 0;
       return True;
@@ -114,9 +118,9 @@ package body Fasyn.Classic is
   end parse_web_server_addresses;
 
   function initialize
-    (self        : in out Context;
-     event_loop  : Clair.Event_Loop.Context_Access;
-     handler     : Fasyn.Listener.Accept_Handler_Access;
+    (self        : aliased in out Context;
+     event_loop  : not null Clair.Event_Loop.Context_Access;
+     handler     : not null Fasyn.Listener.Accept_Handler_Access;
      diagnostics : Fasyn.Diagnostics.Reporter_Access := null)
   return Clair.Status.Code
   is
@@ -124,10 +128,6 @@ package body Fasyn.Classic is
   begin
     if self.initialized then
       return Clair.Status.INVALID_STATE;
-    end if;
-
-    if event_loop = null or else handler = null then
-      return Clair.Status.INVALID_ARGUMENT;
     end if;
 
     self.handler := handler;
@@ -158,11 +158,12 @@ package body Fasyn.Classic is
       end if;
     end if;
 
+    self.accept_handler.owner := self'Unchecked_Access;
     status := Fasyn.Listener.initialize
       (self       => self.listener,
        event_loop => event_loop,
        fd         => FCGI_LISTENSOCK_FILENO,
-       handler    => self'Unchecked_Access);
+       handler    => self.accept_handler'Unchecked_Access);
 
     if status /= Clair.Status.OK then
       status := diagnostic
@@ -174,6 +175,7 @@ package body Fasyn.Classic is
       self.diagnostics := null;
       self.allowed_count := 0;
       self.restrict_peers := False;
+      self.accept_handler.owner := null;
       return status;
     end if;
 
@@ -198,6 +200,7 @@ package body Fasyn.Classic is
     self.allowed_count := 0;
     self.restrict_peers := False;
     self.initialized := False;
+    self.accept_handler.owner := null;
     return Clair.Status.OK;
   end finalize;
 
@@ -206,11 +209,11 @@ package body Fasyn.Classic is
     return self.initialized and then Fasyn.Listener.is_active(self.listener);
   end is_active;
 
-  overriding function on_accept
+  function handle_accept
     (self : in out Context;
      fd   : Clair.IO.Descriptor) return Clair.Status.Code
   is
-    peer         : Clair.Network.IPv4_Address;
+    peer         : Clair.Unix.Network.IPv4_Address;
     status       : Clair.Status.Code;
     close_status : Clair.Status.Code;
     allowed      : Boolean := False;
@@ -220,7 +223,7 @@ package body Fasyn.Classic is
     end if;
 
     if self.restrict_peers then
-      status := Clair.Network.peer_ipv4_address (fd, peer);
+      status := Clair.Unix.Network.query_peer_ipv4_address (fd, peer);
 
       if status = Clair.Status.OK then
         for index in 1 .. self.allowed_count loop
@@ -269,6 +272,18 @@ package body Fasyn.Classic is
     end if;
 
     return Fasyn.Listener.on_accept (self.handler.all, fd);
+  end handle_accept;
+
+  overriding function on_accept
+    (self : in out Accept_Adapter;
+     fd   : Clair.IO.Descriptor) return Clair.Status.Code
+  is
+  begin
+    if self.owner = null then
+      return Clair.Status.INVALID_STATE;
+    end if;
+
+    return handle_accept (self.owner.all, fd);
   end on_accept;
 
 end Fasyn.Classic;

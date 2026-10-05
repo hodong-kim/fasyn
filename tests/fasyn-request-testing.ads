@@ -8,6 +8,10 @@ package Fasyn.Request.Testing is
 
   function output_length (self : Writer) return Natural;
 
+  procedure consume_output
+    (self  : in out Writer;
+     count : Natural);
+
   function output_byte
     (self  : Writer;
      index : Positive)

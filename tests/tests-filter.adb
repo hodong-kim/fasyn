@@ -12,10 +12,11 @@ with Clair.Status;
 with Clair.Test.Assertions;
 with Fasyn.Protocol;
 with Fasyn.Protocol.Codec;
-with Fasyn.Protocol.Messages;
+with Fasyn.Protocol.Bodies;
 with Fasyn.Protocol.Name_Values;
 with Fasyn.Request;
 with Fasyn.Request.Connection;
+with Fasyn.Request.Connection.Testing;
 with Fasyn.Request.Execution;
 with Fasyn.Request.Testing;
 
@@ -24,10 +25,11 @@ package body Tests.Filter is
   package A renames Clair.Test.Assertions;
   package P renames Fasyn.Protocol;
   package C renames Fasyn.Protocol.Codec;
-  package M renames Fasyn.Protocol.Messages;
+  package B renames Fasyn.Protocol.Bodies;
   package N renames Fasyn.Protocol.Name_Values;
   package R renames Fasyn.Request;
   package RC renames Fasyn.Request.Connection;
+  package RCT renames Fasyn.Request.Connection.Testing;
   package E renames Fasyn.Request.Execution;
   package RT renames Fasyn.Request.Testing;
 
@@ -37,7 +39,7 @@ package body Tests.Filter is
   use type Clair.IO.Byte_Count;
   use type Clair.Status.Code;
   use type C.Decode_Status;
-  use type M.Body_Status;
+  use type B.Body_Status;
   use type N.Encode_Status;
   use type P.Role;
   use type R.Input_Status;
@@ -78,79 +80,79 @@ package body Tests.Filter is
 
   overriding procedure on_parameter
     (self    : in out Filter_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array);
 
   overriding procedure on_params_end
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_stdin
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer);
 
   overriding procedure on_stdin_end
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_data
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer);
 
   overriding procedure on_data_end
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer);
 
   overriding procedure on_parameter
     (self    : in out Filter_Application;
-     context : in R.Request_Context;
+     context : in R.Context;
      name    : in P.Byte_Array;
      value   : in P.Byte_Array)
   is
     pragma Unreferenced (name, value);
   begin
     self.parameter_count := self.parameter_count + 1;
-    self.role_seen := R.request_role(context);
+    self.role_seen := R.role(context);
   end on_parameter;
 
   overriding procedure on_params_end
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     marker : constant P.Byte_Array := to_bytes ("P");
   begin
     self.params_end_seen := True;
-    self.role_seen := R.request_role(context);
+    self.role_seen := R.role(context);
 
     if self.write_on_params then
-      R.write_stdout (response, marker, self.params_write_status);
+      self.params_write_status := R.write_stdout (response, marker);
     end if;
   end on_params_end;
 
   overriding procedure on_stdin
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer)
   is
     pragma Unreferenced (response);
   begin
-    self.role_seen := R.request_role(context);
+    self.role_seen := R.role(context);
     self.stdin_bytes := self.stdin_bytes + data'length;
   end on_stdin;
 
   overriding procedure on_stdin_end
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     marker : constant P.Byte_Array := to_bytes ("S");
@@ -158,13 +160,13 @@ package body Tests.Filter is
     finish_status : R.Write_Status;
   begin
     self.stdin_end_seen := True;
-    self.role_seen := R.request_role(context);
-    R.write_stdout (response, marker, write_status);
+    self.role_seen := R.role(context);
+    write_status := R.write_stdout (response, marker);
     self.output_ok := self.output_ok and then
       write_status = R.Write_Complete;
 
     if self.finish_on_stdin_end then
-      R.finish (response, self.finish_status_value, finish_status);
+      finish_status := R.finish (response, self.finish_status_value);
       self.output_ok := self.output_ok and then
         finish_status = R.Write_Complete;
     end if;
@@ -172,43 +174,43 @@ package body Tests.Filter is
 
   overriding procedure on_data
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      data     : in P.Byte_Array;
      response : in out R.Writer)
   is
     status : R.Write_Status;
   begin
-    self.role_seen := R.request_role(context);
+    self.role_seen := R.role(context);
     self.data_bytes := self.data_bytes + data'length;
-    R.write_stdout (response, data, status);
+    status := R.write_stdout (response, data);
     self.output_ok := self.output_ok and then status = R.Write_Complete;
   end on_data;
 
   overriding procedure on_data_end
     (self     : in out Filter_Application;
-     context  : in R.Request_Context;
+     context  : in R.Context;
      response : in out R.Writer)
   is
     status : R.Write_Status;
   begin
     self.data_end_seen := True;
-    self.role_seen := R.request_role(context);
-    R.finish (response, self.finish_status_value, status);
+    self.role_seen := R.role(context);
+    status := R.finish (response, self.finish_status_value);
     self.output_ok := self.output_ok and then status = R.Write_Complete;
   end on_data_end;
 
   procedure encode_begin
     (output : out P.Byte_Array)
   is
-    request_body : constant M.Begin_Request_Body :=
-      (role_code => P.FILTER_ROLE,
+    request_body : constant B.Begin_Request_Body :=
+      (role_code => P.FILTER_CODE,
        flags     => P.KEEP_CONN);
     written : Natural;
-    status  : M.Body_Status;
+    status  : B.Body_Status;
   begin
-    M.encode_begin_request (request_body, output, written, status);
-    if status /= M.Body_Complete or else
-       written /= M.BEGIN_REQUEST_BODY_LENGTH
+    status := B.encode_begin_request (request_body, output, written);
+    if status /= B.Body_Complete or else
+       written /= B.BEGIN_REQUEST_BODY_LENGTH
     then
       raise Program_Error with "Filter BEGIN_REQUEST encoding failed";
     end if;
@@ -227,8 +229,8 @@ package body Tests.Filter is
     written : Natural;
     status  : N.Encode_Status;
   begin
-    N.encode_pair
-      (name_bytes, value_bytes, encoded, written, status);
+    status := N.encode_pair
+      (name_bytes, value_bytes, encoded, written);
 
     if status /= N.Encode_Complete or else
        position + written - 1 > buffer'last
@@ -270,24 +272,23 @@ package body Tests.Filter is
       (version        => P.VERSION_1,
        record_type    => record_type,
        request_id     => 1,
-       content_length => P.Content_Length_Type(content'length),
-       padding_length => 0,
-       reserved       => 0);
+       content_length => P.Content_Length(content'length),
+       padding_length => 0);
   begin
-    R.begin_record (exchange, header, response, status);
+    status := R.begin_record (exchange, header, response);
     if status /= R.Input_Progress then
       return;
     end if;
 
     if content'length > 0 then
-      R.feed_content
-        (exchange, content, application, response, status);
+      status := R.feed_content
+        (exchange, content, application, response);
       if status /= R.Input_Progress then
         return;
       end if;
     end if;
 
-    R.end_record (exchange, application, response, status);
+    status := R.end_record (exchange, application, response);
   end drive_record;
 
   function end_request_status
@@ -299,9 +300,9 @@ package body Tests.Filter is
     header_bytes : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
     header : P.Header;
     decode_status : C.Decode_Status;
-    body_bytes : P.Byte_Array (0 .. M.END_REQUEST_BODY_LENGTH - 1);
-    decoded_body : M.End_Request_Body;
-    body_status : M.Body_Status;
+    body_bytes : P.Byte_Array (0 .. B.END_REQUEST_BODY_LENGTH - 1);
+    decoded_body : B.End_Request_Body;
+    body_status : B.Body_Status;
   begin
     app_status := 0;
     for index in output'range loop
@@ -312,14 +313,14 @@ package body Tests.Filter is
       for offset in header_bytes'range loop
         header_bytes(offset) := output(position + offset);
       end loop;
-      C.decode_header (header_bytes, header, decode_status);
+      decode_status := C.decode_header (header_bytes, header);
       if decode_status /= C.Complete then
         return False;
       end if;
 
-      if header.record_type = P.END_REQUEST_TYPE then
-        if Natural(header.content_length) /= M.END_REQUEST_BODY_LENGTH or else
-           position + P.HEADER_LENGTH + M.END_REQUEST_BODY_LENGTH - 1 >
+      if header.record_type = P.END_REQUEST then
+        if Natural(header.content_length) /= B.END_REQUEST_BODY_LENGTH or else
+           position + P.HEADER_LENGTH + B.END_REQUEST_BODY_LENGTH - 1 >
              output'last
         then
           return False;
@@ -329,11 +330,11 @@ package body Tests.Filter is
           body_bytes(offset) :=
             output(position + P.HEADER_LENGTH + offset);
         end loop;
-        M.decode_end_request (body_bytes, decoded_body, body_status);
+        body_status := B.decode_end_request (body_bytes, decoded_body);
         app_status := decoded_body.application_status;
         return
-          body_status = M.Body_Complete and then
-          decoded_body.protocol_status_code = P.REQUEST_COMPLETE_STATUS;
+          body_status = B.Body_Complete and then
+          decoded_body.protocol_status_code = P.REQUEST_COMPLETE;
       end if;
 
       position :=
@@ -352,7 +353,7 @@ package body Tests.Filter is
       (max_name_bytes => 64, max_value_bytes => 64);
     application : Filter_Application;
     response : R.Writer (max_output_bytes => 512);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     params : P.Byte_Array (1 .. 160);
     params_length : Natural;
     stdin_first : constant P.Byte_Array := to_bytes ("x");
@@ -369,64 +370,64 @@ package body Tests.Filter is
 
     drive_record
       (exchange, application, response,
-       P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+       P.BEGIN_REQUEST, begin_bytes, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter BEGIN_REQUEST is accepted");
 
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, params(1 .. 7), status);
+       P.PARAMS, params(1 .. 7), status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "fragmented Filter PARAMS first record completes");
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, params(8 .. params_length), status);
+       P.PARAMS, params(8 .. params_length), status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "fragmented Filter PARAMS second record completes");
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, empty, status);
+       P.PARAMS, empty, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter PARAMS EOF completes");
 
     drive_record
       (exchange, application, response,
-       P.STDIN_TYPE, stdin_first, status);
+       P.STDIN, stdin_first, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter STDIN first fragment is accepted");
     drive_record
       (exchange, application, response,
-       P.STDIN_TYPE, stdin_second, status);
+       P.STDIN, stdin_second, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter STDIN second fragment is accepted");
     drive_record
       (exchange, application, response,
-       P.STDIN_TYPE, empty, status);
+       P.STDIN, empty, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter STDIN EOF enables output");
 
     drive_record
       (exchange, application, response,
-       P.DATA_TYPE, data_first, status);
+       P.DATA, data_first, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter DATA first record is accepted");
     drive_record
       (exchange, application, response,
-       P.DATA_TYPE, data_second, status);
+       P.DATA, data_second, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter DATA second record is accepted");
     drive_record
       (exchange, application, response,
-       P.DATA_TYPE, empty, status);
+       P.DATA, empty, status);
     A.assert_true
       (reporter, status = R.Request_Complete,
        "Filter DATA EOF completes request");
@@ -472,7 +473,7 @@ package body Tests.Filter is
         (max_name_bytes => 64, max_value_bytes => 64);
       application : Filter_Application;
       response : R.Writer (max_output_bytes => 256);
-      begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+      begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
       params : P.Byte_Array (1 .. 160);
       params_length : Natural;
       status : R.Input_Status;
@@ -481,16 +482,16 @@ package body Tests.Filter is
       build_filter_params (params, params_length);
       drive_record
         (exchange, application, response,
-         P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+         P.BEGIN_REQUEST, begin_bytes, status);
       drive_record
         (exchange, application, response,
-         P.PARAMS_TYPE, params(1 .. params_length), status);
+         P.PARAMS, params(1 .. params_length), status);
       drive_record
         (exchange, application, response,
-         P.PARAMS_TYPE, empty, status);
+         P.PARAMS, empty, status);
       drive_record
         (exchange, application, response,
-         P.DATA_TYPE, empty, status);
+         P.DATA, empty, status);
       A.assert_true
         (reporter, status = R.Invalid_Record_Sequence,
          "Filter rejects DATA before STDIN EOF");
@@ -501,7 +502,7 @@ package body Tests.Filter is
         (max_name_bytes => 64, max_value_bytes => 64);
       application : Filter_Application;
       response : R.Writer (max_output_bytes => 256);
-      begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+      begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
       params : P.Byte_Array (1 .. 160);
       params_length : Natural;
       status : R.Input_Status;
@@ -511,13 +512,13 @@ package body Tests.Filter is
       build_filter_params (params, params_length);
       drive_record
         (exchange, application, response,
-         P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+         P.BEGIN_REQUEST, begin_bytes, status);
       drive_record
         (exchange, application, response,
-         P.PARAMS_TYPE, params(1 .. params_length), status);
+         P.PARAMS, params(1 .. params_length), status);
       drive_record
         (exchange, application, response,
-         P.PARAMS_TYPE, empty, status);
+         P.PARAMS, empty, status);
       A.assert_true
         (reporter,
          status = R.Output_Failed and then
@@ -530,7 +531,7 @@ package body Tests.Filter is
         (max_name_bytes => 64, max_value_bytes => 64);
       application : Filter_Application;
       response : R.Writer (max_output_bytes => 256);
-      begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+      begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
       params : P.Byte_Array (1 .. 160);
       params_length : Natural;
       status : R.Input_Status;
@@ -540,13 +541,13 @@ package body Tests.Filter is
         (params, params_length, include_last_mod => False);
       drive_record
         (exchange, application, response,
-         P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+         P.BEGIN_REQUEST, begin_bytes, status);
       drive_record
         (exchange, application, response,
-         P.PARAMS_TYPE, params(1 .. params_length), status);
+         P.PARAMS, params(1 .. params_length), status);
       drive_record
         (exchange, application, response,
-         P.PARAMS_TYPE, empty, status);
+         P.PARAMS, empty, status);
       A.assert_true
         (reporter, status = R.Malformed_Params,
          "Filter requires FCGI_DATA_LAST_MOD");
@@ -557,7 +558,7 @@ package body Tests.Filter is
         (max_name_bytes => 64, max_value_bytes => 64);
       application : Filter_Application;
       response : R.Writer (max_output_bytes => 256);
-      begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+      begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
       params : P.Byte_Array (1 .. 160);
       params_length : Natural;
       status : R.Input_Status;
@@ -567,13 +568,37 @@ package body Tests.Filter is
         (params, params_length, data_length => "12x");
       drive_record
         (exchange, application, response,
-         P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+         P.BEGIN_REQUEST, begin_bytes, status);
       drive_record
         (exchange, application, response,
-         P.PARAMS_TYPE, params(1 .. params_length), status);
+         P.PARAMS, params(1 .. params_length), status);
       A.assert_true
         (reporter, status = R.Malformed_Params,
          "Filter rejects malformed FCGI_DATA_LENGTH");
+    end;
+
+    declare
+      exchange : R.Exchange
+        (max_name_bytes => 64, max_value_bytes => 64);
+      application : Filter_Application;
+      response : R.Writer (max_output_bytes => 256);
+      begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
+      params : P.Byte_Array (1 .. 160);
+      params_length : Natural;
+      status : R.Input_Status;
+    begin
+      encode_begin (begin_bytes);
+      build_filter_params
+        (params, params_length, data_length => "18446744073709551616");
+      drive_record
+        (exchange, application, response,
+         P.BEGIN_REQUEST, begin_bytes, status);
+      drive_record
+        (exchange, application, response,
+         P.PARAMS, params(1 .. params_length), status);
+      A.assert_true
+        (reporter, status = R.Malformed_Params,
+         "Filter rejects overflowing FCGI_DATA_LENGTH before arithmetic wrap");
     end;
   end filter_protocol_rejections;
 
@@ -584,7 +609,7 @@ package body Tests.Filter is
       (max_name_bytes => 64, max_value_bytes => 64);
     application : Filter_Application;
     response : R.Writer (max_output_bytes => 256);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     params : P.Byte_Array (1 .. 160);
     params_length : Natural;
     too_much : constant P.Byte_Array := to_bytes ("1234");
@@ -595,23 +620,23 @@ package body Tests.Filter is
     build_filter_params (params, params_length, data_length => "3");
     drive_record
       (exchange, application, response,
-       P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+       P.BEGIN_REQUEST, begin_bytes, status);
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, params(1 .. params_length), status);
+       P.PARAMS, params(1 .. params_length), status);
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, empty, status);
+       P.PARAMS, empty, status);
     drive_record
       (exchange, application, response,
-       P.STDIN_TYPE, empty, status);
+       P.STDIN, empty, status);
     A.assert_true
       (reporter, status = R.Record_Complete,
        "Filter STDIN EOF precedes DATA length validation");
 
     drive_record
       (exchange, application, response,
-       P.DATA_TYPE, too_much, status);
+       P.DATA, too_much, status);
     A.assert_true
       (reporter, status = R.Invalid_Content_Length,
        "Filter rejects DATA beyond FCGI_DATA_LENGTH");
@@ -624,7 +649,7 @@ package body Tests.Filter is
         (max_name_bytes => 64, max_value_bytes => 64);
       short_application : Filter_Application;
       short_response : R.Writer (max_output_bytes => 256);
-      short_begin : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+      short_begin : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
       short_params : P.Byte_Array (1 .. 160);
       short_params_length : Natural;
       short_data : constant P.Byte_Array := to_bytes ("123");
@@ -635,22 +660,22 @@ package body Tests.Filter is
         (short_params, short_params_length, data_length => "5");
       drive_record
         (short_exchange, short_application, short_response,
-         P.BEGIN_REQUEST_TYPE, short_begin, short_status);
+         P.BEGIN_REQUEST, short_begin, short_status);
       drive_record
         (short_exchange, short_application, short_response,
-         P.PARAMS_TYPE, short_params(1 .. short_params_length), short_status);
+         P.PARAMS, short_params(1 .. short_params_length), short_status);
       drive_record
         (short_exchange, short_application, short_response,
-         P.PARAMS_TYPE, empty, short_status);
+         P.PARAMS, empty, short_status);
       drive_record
         (short_exchange, short_application, short_response,
-         P.STDIN_TYPE, empty, short_status);
+         P.STDIN, empty, short_status);
       drive_record
         (short_exchange, short_application, short_response,
-         P.DATA_TYPE, short_data, short_status);
+         P.DATA, short_data, short_status);
       drive_record
         (short_exchange, short_application, short_response,
-         P.DATA_TYPE, empty, short_status);
+         P.DATA, empty, short_status);
 
       A.assert_true
         (reporter, short_status = R.Request_Complete,
@@ -668,7 +693,7 @@ package body Tests.Filter is
       (max_name_bytes => 64, max_value_bytes => 64);
     application : Filter_Application;
     response : R.Writer (max_output_bytes => 256);
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     params : P.Byte_Array (1 .. 160);
     params_length : Natural;
     empty : P.Byte_Array (1 .. 0);
@@ -681,16 +706,16 @@ package body Tests.Filter is
 
     drive_record
       (exchange, application, response,
-       P.BEGIN_REQUEST_TYPE, begin_bytes, status);
+       P.BEGIN_REQUEST, begin_bytes, status);
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, params(1 .. params_length), status);
+       P.PARAMS, params(1 .. params_length), status);
     drive_record
       (exchange, application, response,
-       P.PARAMS_TYPE, empty, status);
+       P.PARAMS, empty, status);
     drive_record
       (exchange, application, response,
-       P.STDIN_TYPE, empty, status);
+       P.STDIN, empty, status);
 
     A.assert_true
       (reporter, status = R.Request_Complete,
@@ -714,9 +739,8 @@ package body Tests.Filter is
       (version        => P.VERSION_1,
        record_type    => record_type,
        request_id     => 1,
-       content_length => P.Content_Length_Type(content'length),
-       padding_length => 0,
-       reserved       => 0);
+       content_length => P.Content_Length(content'length),
+       padding_length => 0);
     bytes : P.Byte_Array (0 .. P.HEADER_LENGTH - 1);
   begin
     C.encode_header (header, bytes);
@@ -740,14 +764,14 @@ package body Tests.Filter is
   begin
     while position <= data'last loop
       status := Clair.IO.write
-        (fd     => fd,
-         buf    => data(position)'address,
-         count  => Interfaces.C.size_t(data'last - position + 1),
-         result => written);
+        (fd            => fd,
+         buffer        => data(position)'address,
+         count         => Clair.IO.Byte_Count(data'last - position + 1),
+         bytes_written => written);
       if status /= Clair.Status.OK then
         return status;
       end if;
-      if written <= 0 then
+      if written = 0 then
         return Clair.Status.END_OF_STREAM;
       end if;
       position := position + Natural(written);
@@ -818,7 +842,7 @@ package body Tests.Filter is
        max_name_bytes              => 64,
        max_value_bytes             => 64,
        max_request_output_bytes    => 512,
-       max_output_bytes            => 512,
+       max_connection_output_bytes => 512,
        read_buffer_bytes           => 8,
        write_chunk_bytes           => 7);
     runtime_raw : aliased Interfaces.C.int := -1;
@@ -828,7 +852,7 @@ package body Tests.Filter is
     native_error : Interfaces.C.int;
     status : Clair.Status.Code;
     dispatched : Boolean;
-    begin_bytes : P.Byte_Array (0 .. M.BEGIN_REQUEST_BODY_LENGTH - 1);
+    begin_bytes : P.Byte_Array (0 .. B.BEGIN_REQUEST_BODY_LENGTH - 1);
     params : P.Byte_Array (1 .. 160);
     params_length : Natural;
     stdin_data : constant P.Byte_Array := to_bytes ("abcdefghijkl");
@@ -861,40 +885,39 @@ package body Tests.Filter is
        event_loop'Unchecked_Access,
        worker_count     => 1,
        pending_capacity => 1,
-       max_input_bytes  => 64,
+       max_input_bytes  => 128,
        max_output_bytes => 512);
     A.assert_true
       (reporter, status = Clair.Status.OK,
        "Filter executor initializes");
-    status := RC.initialize
+    status := RCT.initialize_without_shared_admission
       (connection,
        event_loop'Unchecked_Access,
        runtime_fd,
        application'Unchecked_Access,
        executor'Unchecked_Access,
-       request_timeout => 60_000,
-       connection_id   => 40);
+       request_lifetime_timeout => 60_000);
     A.assert_true
       (reporter, status = Clair.Status.OK,
        "Filter connection initializes");
 
     append_record
-      (input, input_position, P.BEGIN_REQUEST_TYPE, begin_bytes);
+      (input, input_position, P.BEGIN_REQUEST, begin_bytes);
     append_record
-      (input, input_position, P.PARAMS_TYPE,
+      (input, input_position, P.PARAMS,
        params(1 .. params_length));
     append_record
-      (input, input_position, P.PARAMS_TYPE, empty);
+      (input, input_position, P.PARAMS, empty);
     append_record
-      (input, input_position, P.STDIN_TYPE, stdin_data);
+      (input, input_position, P.STDIN, stdin_data);
     append_record
-      (input, input_position, P.STDIN_TYPE, empty);
+      (input, input_position, P.STDIN, empty);
     append_record
-      (input, input_position, P.DATA_TYPE, data_data(1 .. 9));
+      (input, input_position, P.DATA, data_data(1 .. 9));
     append_record
-      (input, input_position, P.DATA_TYPE, data_data(10 .. data_data'last));
+      (input, input_position, P.DATA, data_data(10 .. data_data'last));
     append_record
-      (input, input_position, P.DATA_TYPE, empty);
+      (input, input_position, P.DATA, empty);
 
     status := write_all
       (peer_fd, input(input'first .. input_position - 1));
@@ -909,7 +932,7 @@ package body Tests.Filter is
       exit when status /= Clair.Status.OK;
       read_available (peer_fd, output, output_length);
       exit when
-        RC.active_request_count(connection) = 0 and then
+        RC.active_requests(connection) = 0 and then
         RC.pending_output_bytes(connection) = 0 and then
         output_length > 0;
     end loop;

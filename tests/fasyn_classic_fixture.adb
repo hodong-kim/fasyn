@@ -3,7 +3,6 @@
 -- Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
 -- ============================================================================
 with Ada.Command_Line;
-with Interfaces.C;
 with System.Storage_Elements;
 with Clair.Event_Loop;
 with Clair.IO;
@@ -141,7 +140,7 @@ begin
       close_status : Clair.Status.Code;
     begin
       status := Clair.IO.write
-        (ready_fd, ready_byte'Address, Interfaces.C.size_t(1), ready_count);
+        (ready_fd, ready_byte'Address, Clair.IO.Byte_Count(1), ready_count);
       close_status := Clair.IO.close (ready_fd);
 
       if status /= Clair.Status.OK or else

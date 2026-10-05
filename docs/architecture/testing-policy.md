@@ -13,13 +13,17 @@ Tests shall cover at least:
 - management record behavior;
 - resource accounting and admission;
 - multiplexing;
-- request-ID reuse and stale-work rejection;
-- cancellation;
-- partial nonblocking I/O;
+- request-ID reuse, generation/connection-identity exhaustion, and stale-work
+  rejection;
+- cancellation and waiter lost-wakeup/cancellation races;
+- request-timer ownership across slot reuse;
+- partial nonblocking I/O and spurious/would-block readiness;
 - connection close and `FCGI_KEEP_CONN`;
 - executor saturation;
 - timeout and shutdown;
-- classic inherited-listener startup where supported;
+- listener accept-budget storms, callback rejection/exception ownership, and
+  post-admission initialization failure;
+- classic inherited-listener startup and peer-address rejection where supported;
 - end-to-end interoperability with at least one independent FastCGI peer.
 
 ## Fragmentation
@@ -71,7 +75,7 @@ Malformed or invalid peer input shall cover:
 - malformed discrete record body;
 - invalid role;
 - invalid stream sequencing;
-- malformed name-value length encoding;
+- malformed or noncanonical name-value length encoding;
 - records targeting inactive request IDs;
 - truncated connection input.
 
@@ -91,6 +95,22 @@ Useful properties include:
   transition.
 
 A fuzz failure shall become a deterministic regression test before closure.
+
+## Long-Run Validation
+
+The ordinary native suite shall remain deterministic and bounded in duration.
+`rake test-fast` owns that single-pass development loop. A separate heavy
+target shall repeat the complete attack-shaped suite in one process so process
+restart cannot hide retained heap, descriptors, timer state, or runtime
+ownership. Canonical native acceptance through `rake test` composes the
+single-pass suite with that long-run gate. Long-run acceptance shall require
+forward progress and compare post-warmup RSS/FD measurements against explicit
+bounds.
+
+High-scale campaigns shall exercise the same protocol/runtime surfaces covered by
+the deterministic suite, including request/connection churn, saturation and
+recovery, malformed/fuzz input, multiplexing, cancellation, and request-ID reuse.
+A discovered long-run failure becomes a deterministic regression before closure.
 
 ## Conformance Evidence
 

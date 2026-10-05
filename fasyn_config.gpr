@@ -1,0 +1,35 @@
+-- ============================================================================
+-- fasyn_config.gpr
+-- Copyright (c) 2026 Hodong Kim <hodong@nimfsoft.com>
+-- ============================================================================
+abstract project Fasyn_Config is
+
+  for Source_Dirs use ();
+
+  Target_Name := external ("CLAIR_TARGET", "native");
+
+  type Build_Profile_Type is ("debug", "release");
+  Build_Profile : Build_Profile_Type :=
+    external ("CLAIR_BUILD_PROFILE", "release");
+  Build_Profile_Name := external ("CLAIR_BUILD_PROFILE", "release");
+  Clair_Artifact_Profile_Name :=
+    external ("CLAIR_ARTIFACT_PROFILE", Build_Profile_Name);
+  Clair_Library_Type_Name :=
+    external ("CLAIR_LIBRARY_TYPE", "static-pic");
+  Artifact_Profile_Name :=
+    Clair_Artifact_Profile_Name & "-clair-" & Clair_Library_Type_Name;
+
+  Ada_Common_Switches :=
+    ("-gnat2022", "-gnatwa", "-gnatW8", "-gnatwe");
+  Ada_Profile_Switches := ();
+
+  case Build_Profile is
+    when "debug" =>
+      Ada_Profile_Switches := ("-O0", "-g");
+    when "release" =>
+      Ada_Profile_Switches := ("-O2");
+  end case;
+
+  Ada_Switches := Ada_Common_Switches & Ada_Profile_Switches;
+
+end Fasyn_Config;

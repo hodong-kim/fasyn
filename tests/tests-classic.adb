@@ -13,6 +13,7 @@ with Clair.Status;
 with Clair.Test.Assertions;
 with Fasyn.Classic;
 with Fasyn.Diagnostics;
+with Fasyn.Environment_Variables;
 with Fasyn.Listener;
 
 package body Tests.Classic is
@@ -63,9 +64,10 @@ package body Tests.Classic is
   end fixture_path;
 
   type Diagnostic_Recorder is new D.Reporter with record
-    count  : Natural := 0;
-    kind   : D.Category := D.Environment_Error;
-    status : Clair.Status.Code := Clair.Status.OK;
+    count           : Natural := 0;
+    kind            : D.Category := D.Environment_Error;
+    status          : Clair.Status.Code := Clair.Status.OK;
+    raise_on_report : Boolean := False;
   end record;
 
   overriding procedure report
@@ -79,6 +81,9 @@ package body Tests.Classic is
     self.count := self.count + 1;
     self.kind := kind;
     self.status := status;
+    if self.raise_on_report then
+      raise Program_Error with "test classic diagnostic reporter failure";
+    end if;
   end report;
 
   type Accept_Recorder is new Fasyn.Listener.Accept_Handler with record
@@ -154,6 +159,9 @@ package body Tests.Classic is
         exit_code := Integer(PE.exit_code_of(outcome));
       end if;
     end if;
+
+    PE.reset (outcome);
+    PE.reset (command);
   end run_fixture;
 
   procedure close_pair
@@ -332,7 +340,7 @@ package body Tests.Classic is
   function oversized_address_binding return String is
     result : US.Unbounded_String;
   begin
-    for index in 1 .. Fasyn.Classic.MAX_WEB_SERVER_ADDRESSES + 1 loop
+    for index in 1 .. 65 loop
       if index > 1 then
         US.append (result, ",");
       end if;
@@ -351,8 +359,9 @@ package body Tests.Classic is
     old_exists   : constant Boolean :=
       Ada.Environment_Variables.exists(Fasyn.Classic.FCGI_WEB_SERVER_ADDRS);
     old_value    : US.Unbounded_String;
-    status       : Clair.Status.Code;
-    loop_status  : Clair.Status.Code;
+    status                : Clair.Status.Code;
+    loop_status           : Clair.Status.Code;
+    invalid_name_rejected : Boolean := False;
   begin
     if old_exists then
       old_value := US.to_unbounded_string
@@ -366,7 +375,8 @@ package body Tests.Classic is
       return;
     end if;
 
-    Ada.Environment_Variables.set
+    diagnostics.raise_on_report := True;
+    Fasyn.Environment_Variables.set
       (Fasyn.Classic.FCGI_WEB_SERVER_ADDRS, "127.0.0.1,");
     status := Fasyn.Classic.initialize
       (self        => classic,
@@ -377,7 +387,7 @@ package body Tests.Classic is
     A.assert_true
       (reporter,
        status = Clair.Status.INVALID_ARGUMENT,
-       "malformed address binding is rejected before listener admission");
+       "reporter exception does not replace malformed-address status");
     A.assert_equal_natural
       (reporter, diagnostics.count, 1,
        "environment syntax failure is reported");
@@ -387,7 +397,7 @@ package body Tests.Classic is
        diagnostics.status = Clair.Status.INVALID_ARGUMENT,
        "environment diagnostic preserves category and status");
 
-    Ada.Environment_Variables.set
+    Fasyn.Environment_Variables.set
       (Fasyn.Classic.FCGI_WEB_SERVER_ADDRS, oversized_address_binding);
     status := Fasyn.Classic.initialize
       (self        => classic,
@@ -403,11 +413,21 @@ package body Tests.Classic is
       (reporter, diagnostics.count, 2, "address bound failure is reported");
 
     if old_exists then
-      Ada.Environment_Variables.set
+      Fasyn.Environment_Variables.set
         (Fasyn.Classic.FCGI_WEB_SERVER_ADDRS, US.to_string(old_value));
     else
       Ada.Environment_Variables.clear (Fasyn.Classic.FCGI_WEB_SERVER_ADDRS);
     end if;
+
+    begin
+      Fasyn.Environment_Variables.set ("", "invalid");
+    exception
+      when Constraint_Error =>
+        invalid_name_rejected := True;
+    end;
+    A.assert_true
+      (reporter, invalid_name_rejected,
+       "environment Set rejects a prohibited name with Constraint_Error");
 
     loop_status := Clair.Event_Loop.finalize (loop_context);
     A.assert_true

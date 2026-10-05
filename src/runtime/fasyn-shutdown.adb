@@ -1,31 +1,45 @@
 -- ============================================================================
--- fasyn-request-shutdown.adb
+-- fasyn-shutdown.adb
 -- Copyright (c) 2023-2026 Hodong Kim <hodong@nimfsoft.com>
 -- ============================================================================
-package body Fasyn.Request.Shutdown is
+with Ada.Unchecked_Conversion;
+with System;
+
+package body Fasyn.Shutdown is
 
   use type Clair.Event_Loop.Milliseconds;
   use type Clair.Status.Code;
-  use type RC.Context_Access;
 
-  type Deadline_Handler is limited new Clair.Event_Loop.Timer_Handler
-    with record
+  type Deadline_Handler is limited record
     expired : Boolean := False;
   end record;
+  type Deadline_Handler_Access is access all Deadline_Handler;
 
-  overriding function on_timer
-    (handler : in out Deadline_Handler;
-     timer   : Clair.Event_Loop.Handle) return Clair.Status.Code;
+  function address_to_deadline_handler is new Ada.Unchecked_Conversion
+    (System.Address, Deadline_Handler_Access);
 
-  overriding function on_timer
-    (handler : in out Deadline_Handler;
-     timer   : Clair.Event_Loop.Handle) return Clair.Status.Code
+  function deadline_callback
+    (source  : access constant Clair.Event_Loop.Source_Handle;
+     context : System.Address) return Clair.Status.Code
+  with Convention => C;
+
+  function deadline_callback
+    (source  : access constant Clair.Event_Loop.Source_Handle;
+     context : System.Address) return Clair.Status.Code
   is
-    pragma Unreferenced (timer);
+    pragma Unreferenced (source);
+    handler : constant Deadline_Handler_Access :=
+      address_to_deadline_handler (context);
   begin
+    if handler = null then
+      return Clair.Status.INVALID_STATE;
+    end if;
     handler.expired := True;
     return Clair.Status.OK;
-  end on_timer;
+  exception
+    when others =>
+      return Clair.Status.CALLBACK_FAILED;
+  end deadline_callback;
 
   function drain
     (event_loop   : in out Clair.Event_Loop.Context;
@@ -35,7 +49,7 @@ package body Fasyn.Request.Shutdown is
      result       : out Outcome) return Clair.Status.Code
   is
     deadline       : aliased Deadline_Handler;
-    deadline_timer : Clair.Event_Loop.Handle;
+    deadline_timer : Clair.Event_Loop.Source_Handle;
     timer_owned    : Boolean := False;
     dispatched     : Boolean;
     depth          : Natural;
@@ -45,9 +59,7 @@ package body Fasyn.Request.Shutdown is
     function all_drained return Boolean is
     begin
       for index in connections'range loop
-        if connections(index) /= null and then
-           RC.is_active(connections(index).all)
-        then
+        if RC.is_active(connections(index).all) then
           return False;
         end if;
       end loop;
@@ -75,11 +87,9 @@ package body Fasyn.Request.Shutdown is
     function finalize_drained return Clair.Status.Code is
     begin
       for index in connections'range loop
-        if connections(index) /= null then
-          cleanup_status := RC.finalize (connections(index).all);
-          if cleanup_status /= Clair.Status.OK then
-            return cleanup_status;
-          end if;
+        cleanup_status := RC.finalize (connections(index).all);
+        if cleanup_status /= Clair.Status.OK then
+          return cleanup_status;
         end if;
       end loop;
 
@@ -89,9 +99,7 @@ package body Fasyn.Request.Shutdown is
     function force_close_connections return Clair.Status.Code is
     begin
       for index in connections'range loop
-        if connections(index) /= null and then
-           RC.is_active(connections(index).all)
-        then
+        if RC.is_active(connections(index).all) then
           cleanup_status := RC.finalize (connections(index).all);
           if cleanup_status /= Clair.Status.OK and then
              cleanup_status /= Clair.Status.INVALID_STATE
@@ -111,6 +119,10 @@ package body Fasyn.Request.Shutdown is
       return Clair.Status.INVALID_ARGUMENT;
     end if;
 
+    if not E.is_initialized(executor) then
+      return Clair.Status.INVALID_STATE;
+    end if;
+
     status := Clair.Event_Loop.get_depth (event_loop, depth);
     if status /= Clair.Status.OK then
       return status;
@@ -122,19 +134,18 @@ package body Fasyn.Request.Shutdown is
 
     status := Clair.Event_Loop.add_timer
       (self     => event_loop,
-       interval => grace_period,
-       handler  => deadline'Unchecked_Access,
-       one_shot => True,
-       source   => deadline_timer);
+       interval         => grace_period,
+       callback         => deadline_callback'Access,
+       callback_context => deadline'Address,
+       one_shot         => True,
+       source           => deadline_timer);
     if status /= Clair.Status.OK then
       return status;
     end if;
     timer_owned := True;
 
     for index in connections'range loop
-      if connections(index) /= null and then
-         RC.is_active(connections(index).all)
-      then
+      if RC.is_active(connections(index).all) then
         status := RC.begin_shutdown (connections(index).all);
         if status /= Clair.Status.OK then
           cleanup_status := remove_deadline;
@@ -200,4 +211,4 @@ package body Fasyn.Request.Shutdown is
     return Clair.Status.OK;
   end drain;
 
-end Fasyn.Request.Shutdown;
+end Fasyn.Shutdown;
